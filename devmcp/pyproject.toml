@@ -1,0 +1,26 @@
+[project]
+name = "devmcp"
+version = "0.1.0"
+description = "A from-scratch MCP server exposing git and CI tooling over the full protocol surface (tools, resources, prompts, roots, sampling)."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+devmcp = "devmcp.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
