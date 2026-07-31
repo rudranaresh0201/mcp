@@ -10,11 +10,29 @@ dependencies = [
 [project.scripts]
 verimcp = "verimcp.cli:main"
 
+[project.entry-points."verimcp.verifiers"]
+filesystem = "verimcp.verifiers.filesystem:FilesystemVerifier"
+git_commit = "verimcp.verifiers.git_commit:GitCommitVerifier"
+git_branch = "verimcp.verifiers.git_branch:GitBranchVerifier"
+ci_run = "verimcp.verifiers.ci_run:CIRunVerifier"
+resource_read = "verimcp.verifiers.resource_read:ResourceReadVerifier"
+git_server_commit = "verimcp.verifiers.git_server_commit:GitServerCommitVerifier"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.3",
     "ruff>=0.6",
+    # mcp-server-git is the real, third-party MCP backend used to prove
+    # verimcp works genuinely in front of a backend it didn't write (see
+    # docs/ROADMAP.md Phase 1). Pinned below mcp 2.0.0 deliberately: that
+    # SDK release (paired with the 2026-07-28 stateless spec) dropped the
+    # low-level @server.list_tools()-style decorator API mcp-server-git
+    # 2026.7.10 is still written against -- without this pin, pip resolves
+    # the newest mcp and mcp-server-git crashes on startup.
+    "mcp-server-git>=2026.7.10",
+    "mcp<2.0.0",
 ]
 
 [build-system]
@@ -26,3 +44,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+timeout = 30

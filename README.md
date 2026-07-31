@@ -1,10 +1,13 @@
-# verimcp
+# A trusted agent stack for MCP
 
-**A verification proxy for the Model Context Protocol — because `isError: false` only means a tool didn't crash, not that it told the truth.**
+**Because `isError: false` only means a tool didn't crash, not that it told the truth — and an agent operating across git, CI, and infrastructure needs more than hope that its tools are honest.**
 
-MCP's spec has no notion of whether a tool's *claimed* effect actually happened. A `write_file` call can report success while writing nothing, or writing something different from what it claims — and nothing in the protocol catches that. `verimcp` sits between an MCP Host and a real backend MCP server, forwards everything transparently, and independently re-checks ground truth for the calls it has a verifier for before letting the response through. If a claim doesn't match reality, the response gets rewritten with a real diagnostic before the Host ever sees it.
+This repo is two packages that only make sense together:
 
-This repo also contains **`devmcp`** — a from-scratch MCP server, built specifically to give `verimcp` something real to verify: git and CI tooling operating on an actual local repository, deliberately implementing the *full* MCP protocol surface (tools, resources with push subscriptions, prompts, roots negotiation, sampling) rather than just tools, which is where most reference/tutorial servers stop.
+- **`devmcp`** — a broad, verifiable-by-design MCP server. Every domain it covers (git and CI today, expanding per [ADR 0002](docs/adr/0002-devmcp-broad-verifiable-server.md)) is deliberately implemented across the *full* MCP protocol surface (tools, resources with push subscriptions, prompts, roots negotiation, sampling), and every tool ships with a stated, independently-checkable postcondition rather than an implicit "trust me."
+- **`verimcp`** — the trust engine. It sits between an MCP Host and a backend server, forwards everything transparently, and independently re-derives ground truth for the calls it has a verifier for before letting the response through. Verification is the first trust primitive; policy enforcement, audit logging, and observability (see [ROADMAP](docs/ROADMAP.md)) are the same idea applied to allow/deny, provenance, and visibility.
+
+Neither half is the point on its own. A broad tool server without verification is just another dev-tool MCP server; a verification engine with nothing real to verify is a proof of concept. Together, the pitch is: **an agent operating through this stack cannot get away with a false claim, an unapproved action, or an unlogged side effect.**
 
 ```
 Host  <--stdio-->  verimcp (proxy + verification engine)  <--stdio-->  devmcp (git/CI server)
@@ -20,11 +23,11 @@ Both packages are independently installable and have **no import dependency on e
 | M1 | devmcp core: transport, `initialize`, git tools (`write_file`, `git_commit`, `git_branch`, `run_ci_pipeline`) | ✅ done |
 | M2 | devmcp resources (`repo://status`, `repo://log`, `repo://file/{path}`, `ci://last-run`), push subscriptions, prompts | ✅ done |
 | M3 | devmcp roots negotiation + sampling (`summarize_diff`) — the two directions where devmcp asks the *Client* something | ✅ done |
-| M4 | verimcp's generalized verifier engine: `GitCommitVerifier`, `GitBranchVerifier`, `ResourceReadVerifier`, `CIRunVerifier`, a sampling rate-limit gate | 🔜 next |
+| M4 | verimcp's generalized verifier engine: `GitCommitVerifier`, `GitBranchVerifier`, `CIRunVerifier`, `ResourceReadVerifier` done; a sampling rate-limit gate still open | 🔜 almost done |
 | M5 | verimcp's own served capability — an audit log of every verification it's run (`verimcp://audit`), YAML config, working CLI | planned |
 | M6 | Packaging polish, full ADR set, end-to-end demo script | planned |
 
-`devmcp` is fully built and independently working today: real `initialize` handshake, four tools, resources with live subscriptions, two prompts, roots negotiation, and sampling — all proven end-to-end over real stdio, not mocked. `verimcp`'s verification engine currently covers one case (`write_file`, filesystem ground-truth check); wiring it up with git/CI-specific verifiers in front of `devmcp` is the next milestone.
+`devmcp` is fully built and independently working today: real `initialize` handshake, five tools, resources with live subscriptions, two prompts, roots negotiation, and sampling — all proven end-to-end over real stdio, not mocked. `verimcp` now has a verifier for every tool call and resource read with an independently-checkable postcondition — `write_file` (filesystem hash-compare), `git_commit` (commit-object existence), `git_branch` (ref existence + target), `run_ci_pipeline` (per-step self-consistency plus re-execution of steps marked safe to re-run), and `repo://status`/`repo://log`/`repo://file/{path}` (re-derive the same git/filesystem state and compare). What's left for M4 is a policy-not-correctness gate on the one remaining primitive, sampling.
 
 ## Why this split
 

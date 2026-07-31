@@ -20,7 +20,7 @@ class FilesystemVerifier(Verifier):
     def applies_to(self, tool_name: str) -> bool:
         return tool_name in WRITE_TOOLS
 
-    def verify(self, request: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+    def verify(self, request: dict[str, Any], response: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
         result = response.get("result", {})
         if result.get("isError"):
             return response  # backend already reported failure, nothing to add
@@ -31,7 +31,10 @@ class FilesystemVerifier(Verifier):
         if path is None or expected_content is None:
             return response  # not a shape we know how to check
 
-        actual_path = Path(path)
+        if root is None:
+            return response  # can't tell where the backend actually wrote this -- don't guess, don't block
+
+        actual_path = Path(root) / path
         if not actual_path.exists():
             return self._override(response, f"claimed write to {path!r} succeeded, but the file does not exist")
 
@@ -44,12 +47,3 @@ class FilesystemVerifier(Verifier):
             )
 
         return response  # verified: claim matches reality, pass through unchanged
-
-    @staticmethod
-    def _override(response: dict[str, Any], message: str) -> dict[str, Any]:
-        overridden = dict(response)
-        overridden["result"] = {
-            "isError": True,
-            "content": [{"type": "text", "text": f"[verimcp] postcondition check failed: {message}"}],
-        }
-        return overridden

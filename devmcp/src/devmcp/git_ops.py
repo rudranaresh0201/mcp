@@ -9,10 +9,15 @@ class GitError(RuntimeError):
 
 
 def _run(repo_root: Path, *args: str) -> str:
+    # stdin=DEVNULL: devmcp's own real stdin is read on a background thread
+    # (cli.py's _StdinReader). Without this, a spawned git process inherits
+    # that same handle and can deadlock against it on Windows -- the exact
+    # bug found and fixed in verimcp's GitCommitVerifier.
     result = subprocess.run(
         ["git", "-C", str(repo_root), *args],
         capture_output=True,
         text=True,
+        stdin=subprocess.DEVNULL,
         check=False,
     )
     if result.returncode != 0:
