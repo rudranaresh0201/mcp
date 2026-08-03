@@ -5,6 +5,11 @@ description = "A standalone MCP server that proxies real MCP backends and verifi
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
+    # API-only, no exporter deps -- always safe to import. verimcp/telemetry.py
+    # calls only this; the SDK (real span/metric export) is an opt-in extra
+    # below, wired up lazily so a plain `pip install verimcp` never pulls in
+    # exporter dependencies it might not use.
+    "opentelemetry-api>=1.27",
 ]
 
 [project.scripts]
@@ -19,6 +24,15 @@ resource_read = "verimcp.verifiers.resource_read:ResourceReadVerifier"
 git_server_commit = "verimcp.verifiers.git_server_commit:GitServerCommitVerifier"
 
 [project.optional-dependencies]
+# Real span/metric export -- Console for local debugging, OTLP for pointing
+# a free viewer (Jaeger, Grafana) at verimcp traffic. Not required to run
+# verimcp at all: with this extra absent, --otel-exporter is simply unset
+# and every telemetry call in proxy.py is a true no-op (see
+# docs/adr/0005-metrics-via-otel-genai-conventions.md).
+otel = [
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
@@ -33,6 +47,10 @@ dev = [
     # the newest mcp and mcp-server-git crashes on startup.
     "mcp-server-git>=2026.7.10",
     "mcp<2.0.0",
+    # tests/test_telemetry.py needs the SDK's in-memory span/metric readers
+    # to assert real instrumentation output, not just "it didn't crash".
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27",
 ]
 
 [build-system]

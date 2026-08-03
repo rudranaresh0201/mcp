@@ -14,11 +14,12 @@ gets forwarded back to the Host.
 import asyncio
 import itertools
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from verimcp import audit_resource, jsonrpc
+from verimcp import audit_resource, jsonrpc, telemetry
 from verimcp.audit import AuditStore
 from verimcp.gates.base import RequestGate
 from verimcp.gates.sampling_rate_limit import SamplingRateLimitGate
@@ -155,6 +156,15 @@ class Proxy:
         # never leaks into a real JSON-RPC message. Consumed by
         # _record_completed_audit once the backend's response arrives.
         self._pending_approval_meta: dict[str, dict] = {}
+        # Phase 4: one OTel span per in-flight tools/call/resources/read,
+        # keyed by JSON-RPC id -- same request/response correlation problem
+        # self._pending already solves (started in one read loop, finished in
+        # the other, or from _handle_approval's background task), solved the
+        # same way. Unlike self._audit, telemetry has no opt-in flag here:
+        # start_span/finish_span are always called (see telemetry.py's
+        # docstring for why that's safe) -- whether anything actually gets
+        # exported depends only on whether cli.py's configure_sdk ran.
+        self._active_spans: dict = {}
 
     async def run(self) -> None:
         backend = await asyncio.create_subprocess_exec(
@@ -174,6 +184,11 @@ class Proxy:
             # them rather than leaking the process open past exit.
             for task in self._background_tasks:
                 task.cancel()
+            # Same idea for any tools/call or resources/read whose span was
+            # started but whose outcome will now never be recorded.
+            for span, _ in self._active_spans.values():
+                telemetry.abandon_span(span)
+            self._active_spans.clear()
 
     async def _forward_host_to_backend(self, backend) -> None:
         reader = _StdinReader()
@@ -215,6 +230,21 @@ class Proxy:
                 if future is not None and not future.done():
                     future.set_result(message)
                 continue
+
+            if message.get("method") in ("tools/call", "resources/read") and "id" in message:
+                # Started before gating/approval/pending-tracking touches this
+                # id at all, so the span covers the full lifecycle regardless
+                # of which path the call takes below (denied, held for
+                # approval, or forwarded) -- finished in _record_audit, the
+                # single choke point every one of those paths already funnels
+                # through. verimcp://audit resource requests are handled
+                # locally a few lines above (and `continue`d before reaching
+                # here) -- deliberately not spanned, since they're answered
+                # from memory, not a real backend round trip.
+                params = message.get("params", {})
+                target = params.get("uri", "") if message["method"] == "resources/read" else params.get("name", "")
+                span = telemetry.start_span(message["method"], target, message["id"])
+                self._active_spans[message["id"]] = (span, time.monotonic())
 
             if message.get("method") == "tools/call" and "id" in message and self._policy_gate is not None:
                 name = message.get("params", {}).get("name", "")
@@ -334,11 +364,22 @@ class Proxy:
         verification: dict | None = None,
         approval: dict | None = None,
     ) -> None:
-        if self._audit is None:
-            return
         params = request.get("params", {})
         method = request.get("method")
         target = params.get("uri", "") if method == "resources/read" else params.get("name", "")
+
+        # Telemetry and audit logging are separate opt-ins -- finishing the
+        # span happens unconditionally (see self._active_spans's comment),
+        # only the AuditStore write below is gated on --audit-log.
+        span_entry = self._active_spans.pop(request.get("id"), None)
+        if span_entry is not None:
+            span, start_time = span_entry
+            telemetry.finish_span(
+                span, start_time, tool_name=target, outcome=outcome, gate=gate, verification=verification, approval=approval
+            )
+
+        if self._audit is None:
+            return
         arguments = params.get("arguments") if method == "tools/call" else None
         self._audit.record(
             method=method,
@@ -356,9 +397,12 @@ class Proxy:
         backend and got a response -- as opposed to one denied before ever
         being forwarded, which _record_audit's other call sites handle
         directly. Pulls the require_approval gate/approval info back off the
-        request dict if _handle_approval's accept path stashed it there."""
-        if self._audit is None:
-            return
+        request dict if _handle_approval's accept path stashed it there.
+        Runs unconditionally (audit and telemetry are separate opt-ins,
+        both handled inside _record_audit) -- the _pending_approval_meta
+        pop below also needs to happen regardless of --audit-log, or a
+        require_approval-accepted call's side-table entry would never be
+        cleaned up when audit logging is off."""
         meta = self._pending_approval_meta.pop(request.get("id"), {})
         gate = meta.get("gate")
         approval = meta.get("approval")
@@ -437,11 +481,14 @@ class Proxy:
             # _record_completed_audit), not here -- that's the point where
             # verification result is known too, so one combined entry covers
             # gate + verification + approval instead of two partial ones.
-            if self._audit is not None:
-                self._pending_approval_meta[request["id"]] = {
-                    "gate": {"action": "require_approval", "reason": "approved by Host"},
-                    "approval": {"status": "accept"},
-                }
+            # Stashed unconditionally, not just when --audit-log is set --
+            # _record_completed_audit's telemetry span needs this approval
+            # status too, and audit/telemetry are meant to be independent
+            # opt-ins (see _record_audit).
+            self._pending_approval_meta[request["id"]] = {
+                "gate": {"action": "require_approval", "reason": "approved by Host"},
+                "approval": {"status": "accept"},
+            }
             self._pending[request["id"]] = request
             jsonrpc.write_message(backend.stdin, request)
             await backend.stdin.drain()

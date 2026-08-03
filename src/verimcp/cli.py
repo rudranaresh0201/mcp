@@ -12,6 +12,7 @@ import json
 import sys
 from pathlib import Path
 
+from verimcp import telemetry
 from verimcp.gates.tool_call_policy import ToolCallPolicyGate
 from verimcp.proxy import Proxy
 from verimcp.replay import format_report, replay
@@ -86,6 +87,23 @@ def main() -> int:
         "Omit for no audit logging at all (existing behavior).",
     )
     parser.add_argument(
+        "--otel-exporter",
+        choices=["console", "otlp"],
+        default=None,
+        help="Export OpenTelemetry spans/metrics (Phase 4) for every tools/call and "
+        "resources/read verimcp handles -- 'console' prints them to stdout for local "
+        "debugging, 'otlp' sends them to --otel-endpoint (a collector, Jaeger, or Grafana "
+        "Agent). Requires the optional [otel] extra (pip install verimcp[otel]). Omit for "
+        "no telemetry export at all (existing behavior) -- spans/metrics are still created "
+        "internally either way, but are true no-ops without this flag.",
+    )
+    parser.add_argument(
+        "--otel-endpoint",
+        default="localhost:4317",
+        help="OTLP gRPC endpoint to export to. Only used with --otel-exporter otlp (default: "
+        "localhost:4317, the standard local OTel Collector/Jaeger/Grafana Agent port).",
+    )
+    parser.add_argument(
         "backend_cmd",
         nargs=argparse.REMAINDER,
         help="Backend MCP server command to launch, e.g.: verimcp -- devmcp --repo-path ./myrepo",
@@ -103,18 +121,30 @@ def main() -> int:
     policy_config = Path(args.policy_config).resolve() if args.policy_config else None
     audit_log = Path(args.audit_log).resolve() if args.audit_log else None
 
-    asyncio.run(
-        Proxy(
-            backend_cmd,
-            verifier_names=verifier_names,
-            root_override=root_override,
-            sampling_limit=args.sampling_limit,
-            sampling_window=args.sampling_window,
-            policy_config=policy_config,
-            approval_timeout=args.approval_timeout,
-            audit_log=audit_log,
-        ).run()
-    )
+    # Configured once here, at the process entry point -- never inside Proxy
+    # itself. See telemetry.py's module docstring for why (API/SDK split).
+    try:
+        telemetry.configure_sdk(args.otel_exporter, args.otel_endpoint)
+    except RuntimeError as e:
+        parser.error(str(e))
+
+    try:
+        asyncio.run(
+            Proxy(
+                backend_cmd,
+                verifier_names=verifier_names,
+                root_override=root_override,
+                sampling_limit=args.sampling_limit,
+                sampling_window=args.sampling_window,
+                policy_config=policy_config,
+                approval_timeout=args.approval_timeout,
+                audit_log=audit_log,
+            ).run()
+        )
+    finally:
+        # Flush any spans/metrics from the run's final calls before exit --
+        # no-op if --otel-exporter was never given.
+        telemetry.shutdown_sdk()
     return 0
 
 
