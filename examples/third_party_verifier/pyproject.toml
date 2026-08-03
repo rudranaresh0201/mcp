@@ -1,0 +1,16 @@
+[project]
+name = "verimcp-example-reverse-verifier"
+version = "0.1.0"
+description = "Example third-party verifier package for verimcp -- proves the entry_points plugin mechanism works for code outside the verimcp repo itself. See docs/writing-a-verifier.md."
+requires-python = ">=3.11"
+dependencies = ["verimcp"]
+
+[project.entry-points."verimcp.verifiers"]
+reverse_string = "reverse_verifier.verifier:ReverseStringVerifier"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

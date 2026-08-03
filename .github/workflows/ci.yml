@@ -20,6 +20,8 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Install devmcp
         run: pip install -e "./devmcp[dev]"
+      - name: Install example third-party verifier plugin
+        run: pip install -e examples/third_party_verifier
       - name: Lint
         run: |
           ruff check src tests

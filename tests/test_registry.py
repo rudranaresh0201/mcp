@@ -12,10 +12,15 @@ from verimcp.verifiers.resource_read import ResourceReadVerifier
 
 
 def test_load_verifiers_with_no_names_loads_everything_discovered():
+    """>=, not ==: "everything discovered" has to mean everything actually
+    installed, including any third-party verifier plugin (see
+    examples/third_party_verifier/) -- asserting an exact set would make
+    this test fail the moment a real one exists in the environment, which
+    defeats the entire point of a plugin system."""
     verifiers = load_verifiers(None)
 
     types = {type(v) for v in verifiers}
-    assert types == {
+    assert types >= {
         FilesystemVerifier,
         GitCommitVerifier,
         GitBranchVerifier,
