@@ -287,7 +287,22 @@ class Proxy:
             if message.get("method") == "roots/list" and "id" in message:
                 self._pending_roots.add(message["id"])
 
-            if message.get("id") in self._pending_initialize:
+            # "method" not in message" is the JSON-RPC-correct way to tell a
+            # response from a request: only requests/notifications carry
+            # "method", so this guards against an id collision between the
+            # Host's own request-id sequence and the backend's *own*,
+            # completely independent self-originated-request counter (e.g.
+            # devmcp's roots/list). Without it, a same-numbered roots/list
+            # *request* arriving while an initialize/resources/list response
+            # is still pending would be misread as that response -- a real,
+            # reproducible bug found via MCP Inspector (a real client that,
+            # unlike this project's own tests, doesn't proactively answer
+            # roots/list before sending its next request) -- see
+            # docs/adr/0006-mcp-inspector-compatibility.md. The same
+            # id-collision class ADR 0003 already solved for elicitation ids
+            # via a reserved string prefix; this is its counterpart for the
+            # Phase 3 tracking sets added afterward.
+            if "method" not in message and message.get("id") in self._pending_initialize:
                 self._pending_initialize.discard(message["id"])
                 if "result" in message:
                     # verimcp always has an audit resource to offer once
@@ -298,7 +313,7 @@ class Proxy:
                         "subscribe", True
                     )
 
-            if message.get("id") in self._pending_resource_list:
+            if "method" not in message and message.get("id") in self._pending_resource_list:
                 self._pending_resource_list.discard(message["id"])
                 message = self._inject_audit_resources(message)
 

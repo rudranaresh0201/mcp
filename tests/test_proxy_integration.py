@@ -648,3 +648,53 @@ async def test_audit_subscribe_fires_update_notification_after_a_tool_call(tmp_p
     finally:
         proc.terminate()
         await proc.wait()
+
+
+async def test_resource_list_id_collision_with_backends_own_roots_list_id(tmp_path: Path):
+    """Found via a real MCP Inspector run (docs/adr/0006-mcp-inspector-
+    compatibility.md), not by this project's own tests -- every existing
+    test here answers roots/list before sending its next request, so the
+    window this bug lives in never opened. A real client that doesn't do
+    that (nothing in the spec requires it) exposes it: devmcp's own
+    self-originated roots/list is *always* id 1 (its first request, own
+    counter), completely independent of whatever id the Host happens to
+    pick for resources/list. If the Host also happens to use id 1 -- legal,
+    since JSON-RPC ids only need to be unique among a sender's own in-flight
+    requests -- the two unrelated messages collide unless verimcp checks
+    "is this actually a response" (no "method" key) before treating an
+    id match as the resources/list reply."""
+    audit_path = tmp_path / "audit.jsonl"
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--audit-log", str(audit_path)])
+    try:
+        await _initialize(proc)  # consumes id 1 for the Host's own request/response pair
+
+        # Deliberately reuse id 1 for resources/list, and deliberately don't
+        # answer devmcp's roots/list (also id 1, its own independent
+        # counter) before reading the response -- the exact ordering a real
+        # one-shot client produced.
+        await _send(proc, {"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {}})
+
+        seen = []
+        roots_request = None
+        while True:
+            message = await _recv(proc)
+            seen.append(message)
+            if message.get("method") == "roots/list":
+                roots_request = message
+            if message.get("id") == 1 and "result" in message and "resources" in message["result"]:
+                break
+
+        responses_with_resources = [m for m in seen if m.get("id") == 1 and "result" in m]
+        assert len(responses_with_resources) == 1, f"got duplicate/corrupted responses: {seen}"
+
+        uris = {r["uri"] for r in responses_with_resources[0]["result"]["resources"]}
+        assert uris == {"repo://status", "repo://log", "ci://last-run", "verimcp://audit", "verimcp://audit/current"}
+
+        assert roots_request is not None, "devmcp's roots/list request must still reach the Host, not be swallowed"
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+    finally:
+        proc.terminate()
+        await proc.wait()
