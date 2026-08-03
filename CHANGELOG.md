@@ -1,0 +1,68 @@
+# Changelog
+
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
+versions apply to both `verimcp` and `devmcp`, which are versioned in
+lockstep since they've evolved together, despite having no import
+dependency on each other.
+
+## [0.2.0]
+
+### Added — verimcp
+
+- **Phase 2 — Policy engine**: `ToolCallPolicyGate` (`allow`/`deny`/
+  `require_approval`, tool name + glob argument matching, `--policy-config`).
+  `require_approval` implemented via the real MCP `elicitation/create`
+  primitive, not an invented mechanism — see
+  [ADR 0003](docs/adr/0003-require-approval-via-elicitation.md).
+- **Phase 3 — Audit logging + session replay**: every `tools/call`/
+  `resources/read` recorded as JSONL (`--audit-log`), served back to the
+  Host as a real `verimcp://audit` MCP resource (capability-patched into
+  the backend's `initialize`/`resources/list` responses), plus
+  `verimcp replay` for offline policy backtesting — see
+  [ADR 0004](docs/adr/0004-audit-log-as-mcp-resource-and-policy-replay.md).
+- **Phase 4 — Metrics & observability**: OpenTelemetry spans + metrics for
+  every `tools/call`/`resources/read`, using GenAI semantic conventions
+  where they fit and a `verimcp.*` namespace for governance-specific data
+  (`--otel-exporter console|otlp`) — see
+  [ADR 0005](docs/adr/0005-metrics-via-otel-genai-conventions.md).
+- **Phase 6 — Adversarial test corpus**: a real, deliberately-lying MCP
+  server fixture (`tests/fixtures/lying_server.py`) proving every verifier
+  catches its corresponding lie over a real stdio pipe (`tests/
+  test_adversarial_corpus.py`, 6/6).
+- **Phase 7 — Verifier SDK**: `docs/writing-a-verifier.md` plus a real,
+  independently pip-installable example plugin package
+  (`examples/third_party_verifier/`) proving third-party verifiers are
+  discoverable with zero verimcp source changes.
+- `--root` CLI override for backends that never negotiate `roots/list`
+  (e.g. the reference `mcp-server-git`).
+- `GitServerCommitVerifier`, proving the verifier plugin system works
+  against a real third-party backend, not just `devmcp`.
+
+### Fixed — verimcp
+
+- A `resources/list`/`initialize` response-tracking id collision with a
+  backend's own self-originated request ids (e.g. `roots/list`), found via
+  a real run against MCP Inspector — see
+  [ADR 0006](docs/adr/0006-mcp-inspector-compatibility.md).
+- Two silent-no-op bugs where telemetry never fired unless `--audit-log`
+  was also passed, despite being meant as independent opt-ins.
+
+### Verified
+
+- **Phase 1 — Backend independence**: proven against the official
+  third-party `mcp-server-git` reference server, not just `devmcp`.
+- **Phase 5 — Real client compatibility**: proven against the real MCP
+  Inspector CLI (`scripts/inspector_smoke_test.py`).
+
+## [0.1.0]
+
+Initial release.
+
+- `devmcp`: full-protocol MCP server (tools, resources with subscriptions,
+  prompts, roots negotiation, sampling) over git/CI tooling.
+- `verimcp`: verification proxy with a plugin-based `Verifier` registry
+  (`importlib.metadata.entry_points`), covering `write_file`, `git_commit`,
+  `git_branch`, `run_ci_pipeline`, and `repo://status`/`repo://log`/
+  `repo://file/{path}`.
+- `SamplingRateLimitGate`: the first `RequestGate`, rate-limiting backend-
+  originated `sampling/createMessage` requests before the Host sees them.

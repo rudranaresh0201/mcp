@@ -6,3 +6,5 @@ __pycache__/
 .venv/
 venv/
 verimcp-audit.jsonl
+build/
+dist/

@@ -1,9 +1,24 @@
 [project]
 name = "devmcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "A from-scratch MCP server exposing git and CI tooling over the full protocol surface (tools, resources, prompts, roots, sampling)."
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [{name = "Rudra Naresh"}]
 requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/rudranaresh0201/mcp"
+Repository = "https://github.com/rudranaresh0201/mcp"
 
 [project.scripts]
 devmcp = "devmcp.cli:main"
@@ -14,6 +29,8 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.3",
     "ruff>=0.6",
+    "build>=1.0",
+    "twine>=5.0",
 ]
 
 [build-system]
