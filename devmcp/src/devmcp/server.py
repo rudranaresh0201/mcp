@@ -22,6 +22,7 @@ class Server:
         self.ctx = ServerContext(repo_root=repo_root, connection=connection)
         self.roots_client = RootsClient()
         self._roots_task: asyncio.Task | None = None
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def run(self) -> None:
         while True:
@@ -62,7 +63,14 @@ class Server:
                 },
             )
         elif method == "tools/call":
-            await self._handle_tool_call(id_, params)
+            # Fire-and-forget, same reason as _negotiate_roots below: a tool
+            # can itself make a nested backend-initiated request (e.g.
+            # summarize_diff's sampling/createMessage) and awaiting the tool
+            # call inline here would block this single dispatch loop from
+            # ever reading the reply that nested request is waiting on.
+            task = asyncio.create_task(self._handle_tool_call(id_, params))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         elif method == "resources/list":
             await self.connection.send_response(
                 id_,

@@ -12,15 +12,30 @@ resources/read this proxy has a verifier for, verify() decides what actually
 gets forwarded back to the Host.
 """
 import asyncio
+import itertools
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from verimcp import jsonrpc
+from verimcp import audit_resource, jsonrpc
+from verimcp.audit import AuditStore
+from verimcp.gates.base import RequestGate
+from verimcp.gates.sampling_rate_limit import SamplingRateLimitGate
+from verimcp.gates.tool_call_policy import ToolCallPolicyGate
 from verimcp.verifiers import registry
 
 FILE_URI_PREFIX = "file://"
+# Reserved id namespace for requests *verimcp itself* originates (currently
+# just elicitation/create). Must be a shape no real backend would ever
+# generate on its own -- backends we've seen (devmcp, mcp-server-git) use
+# plain integer ids from their own counters, so a prefixed string can never
+# collide, without needing coordination with the backend at all.
+_ELICITATION_ID_PREFIX = "verimcp-elicit-"
+
+
+def _is_elicitation_id(id_) -> bool:
+    return isinstance(id_, str) and id_.startswith(_ELICITATION_ID_PREFIX)
 
 
 def _extract_root(roots_list_response: dict) -> Path | None:
@@ -54,6 +69,11 @@ class Proxy:
         backend_cmd: list[str],
         verifier_names: list[str] | None = None,
         root_override: Path | None = None,
+        sampling_limit: int = 10,
+        sampling_window: float = 60.0,
+        policy_config: Path | None = None,
+        approval_timeout: float = 60.0,
+        audit_log: Path | None = None,
     ):
         self.backend_cmd = backend_cmd
         # None loads every verifier installed under the verimcp.verifiers
@@ -80,6 +100,61 @@ class Proxy:
         # for exactly that case: a verifier still needs to know the backend's
         # real working directory even when the backend never tells the Host.
         self._root: Path | None = root_override
+        # Policy gates -- unlike verifiers, these check *requests* before
+        # forwarding them at all, in either direction (sampling/createMessage
+        # backend->Host, tools/call Host->backend), not responses. See
+        # docs/adr/0001-verify-vs-dont-framework.md's "Policy gates" bucket.
+        self._gates = [SamplingRateLimitGate(sampling_limit, sampling_window)]
+        # Opt-in: no --policy-config means no tools/call gating at all, same
+        # as today. Given at construction, not lazily, so a bad YAML file
+        # fails loudly at startup instead of on the first tool call.
+        # Held separately (not just via self._gates) because require_approval
+        # needs to be intercepted before the generic gate-check loop ever
+        # runs -- see _forward_host_to_backend.
+        self._policy_gate: ToolCallPolicyGate | None = None
+        if policy_config is not None:
+            self._policy_gate = ToolCallPolicyGate.from_yaml(policy_config)
+            self._gates.append(self._policy_gate)
+        self._approval_timeout = approval_timeout
+        # Whether the Host declared the elicitation capability during
+        # initialize -- learned by sniffing that message as it passes
+        # through unchanged, same technique _extract_root uses on roots/list
+        # replies. Defaults closed: no initialize seen yet means no
+        # elicitation support assumed.
+        self._host_supports_elicitation = False
+        # verimcp's own outstanding elicitation/create requests, keyed by
+        # the reserved id it picked -- resolved when the Host's reply comes
+        # back through _forward_host_to_backend (the same direction the
+        # Host's replies to devmcp's roots/list flow through).
+        self._pending_elicitations: dict[str, asyncio.Future] = {}
+        self._next_elicitation_id = itertools.count(1)
+        # Approval handling runs as a background task (see _handle_approval)
+        # so the single _forward_host_to_backend read loop stays free to
+        # read the elicitation reply that task is waiting on -- the same
+        # deadlock class fixed in devmcp/server.py's tools/call dispatch.
+        # Tracked here so run() can cancel any still-pending ones on exit.
+        self._background_tasks: set[asyncio.Task] = set()
+        # Phase 3: audit log. None means no --audit-log given -- every hook
+        # below is a no-op in that case (see _record_audit), so behavior for
+        # existing callers is unchanged.
+        self._audit = AuditStore(audit_log) if audit_log is not None else None
+        # URIs (verimcp://audit or verimcp://audit/current) the Host has
+        # asked to be notified about via resources/subscribe -- checked after
+        # every _record_audit() call to decide whether to fire
+        # notifications/resources/updated.
+        self._audit_subscribers: set[str] = set()
+        # ids of the Host's initialize/resources/list requests, tracked the
+        # same way _pending_roots tracks roots/list -- so the matching
+        # backend->Host response can be patched (capabilities.resources) or
+        # extended (the audit resource entries) in _forward_backend_to_host.
+        self._pending_initialize: set = set()
+        self._pending_resource_list: set = set()
+        # gate/approval info for a require_approval call that was accepted,
+        # keyed by request id -- kept out of the request dict itself (which
+        # is the exact object forwarded to the backend over the wire) so it
+        # never leaks into a real JSON-RPC message. Consumed by
+        # _record_completed_audit once the backend's response arrives.
+        self._pending_approval_meta: dict[str, dict] = {}
 
     async def run(self) -> None:
         backend = await asyncio.create_subprocess_exec(
@@ -88,10 +163,17 @@ class Proxy:
             stdout=asyncio.subprocess.PIPE,
         )
 
-        await asyncio.gather(
-            self._forward_host_to_backend(backend),
-            self._forward_backend_to_host(backend),
-        )
+        try:
+            await asyncio.gather(
+                self._forward_host_to_backend(backend),
+                self._forward_backend_to_host(backend),
+            )
+        finally:
+            # A Host that disconnects mid-approval leaves _handle_approval
+            # tasks awaiting a Future that can now never resolve -- cancel
+            # them rather than leaking the process open past exit.
+            for task in self._background_tasks:
+                task.cancel()
 
     async def _forward_host_to_backend(self, backend) -> None:
         reader = _StdinReader()
@@ -101,6 +183,59 @@ class Proxy:
             if message is None:
                 backend.stdin.close()
                 return
+
+            if message.get("method") == "initialize":
+                capabilities = message.get("params", {}).get("capabilities", {})
+                self._host_supports_elicitation = "elicitation" in capabilities
+                if self._audit is not None and "id" in message:
+                    self._pending_initialize.add(message["id"])
+
+            if message.get("method") == "resources/list" and "id" in message and self._audit is not None:
+                self._pending_resource_list.add(message["id"])
+
+            if (
+                self._audit is not None
+                and message.get("method") in ("resources/read", "resources/subscribe", "resources/unsubscribe")
+                and "id" in message
+                and audit_resource.is_audit_uri(message.get("params", {}).get("uri", ""))
+            ):
+                # Ours -- handled locally, never forwarded to the backend and
+                # never tracked in self._pending, same as the synchronous
+                # gate-denial branch below.
+                jsonrpc.write_message_sync(self._handle_audit_resource_request(message))
+                continue
+
+            if _is_elicitation_id(message.get("id")) and ("result" in message or "error" in message):
+                # A reply to a request verimcp itself sent -- never the
+                # backend's business, and swallowed unconditionally (not
+                # just when a Future is still parked) so a late reply after
+                # an already-resolved timeout can't leak through to the
+                # backend as an ordinary message.
+                future = self._pending_elicitations.pop(message["id"], None)
+                if future is not None and not future.done():
+                    future.set_result(message)
+                continue
+
+            if message.get("method") == "tools/call" and "id" in message and self._policy_gate is not None:
+                name = message.get("params", {}).get("name", "")
+                arguments = message.get("params", {}).get("arguments")
+                if self._policy_gate.action_for(name, arguments) == "require_approval":
+                    task = asyncio.create_task(self._handle_approval(message, backend))
+                    self._background_tasks.add(task)
+                    task.add_done_callback(self._background_tasks.discard)
+                    continue
+
+            if message.get("method") is not None and "id" in message:
+                denial = self._check_gates(message)
+                if denial is not None:
+                    if message.get("method") in ("tools/call", "resources/read"):
+                        self._record_audit(
+                            message,
+                            outcome="denied",
+                            gate={"action": "deny", "reason": denial["error"]["message"]},
+                        )
+                    jsonrpc.write_message_sync(denial)
+                    continue
 
             if message.get("method") in ("tools/call", "resources/read") and "id" in message:
                 self._pending[message["id"]] = message
@@ -122,11 +257,201 @@ class Proxy:
             if message.get("method") == "roots/list" and "id" in message:
                 self._pending_roots.add(message["id"])
 
+            if message.get("id") in self._pending_initialize:
+                self._pending_initialize.discard(message["id"])
+                if "result" in message:
+                    # verimcp always has an audit resource to offer once
+                    # --audit-log is set, regardless of whether *this*
+                    # backend declares resources support -- merge, don't
+                    # override, whatever it already declared.
+                    message["result"].setdefault("capabilities", {}).setdefault("resources", {}).setdefault(
+                        "subscribe", True
+                    )
+
+            if message.get("id") in self._pending_resource_list:
+                self._pending_resource_list.discard(message["id"])
+                message = self._inject_audit_resources(message)
+
+            if message.get("method") is not None and "id" in message:
+                denial = self._check_gates(message)
+                if denial is not None:
+                    jsonrpc.write_message(backend.stdin, denial)
+                    await backend.stdin.drain()
+                    continue
+
             request = self._pending.pop(message.get("id"), None)
             if request is not None:
                 params = request.get("params", {})
                 identifier = params.get("uri", "") if request.get("method") == "resources/read" else params.get("name", "")
-                for verifier in registry.verifiers_for(identifier, self._verifiers):
+                verifiers_run = registry.verifiers_for(identifier, self._verifiers)
+                for verifier in verifiers_run:
                     message = verifier.verify(request, message, root=self._root)
+                self._record_completed_audit(request, message, verifiers_run)
 
             jsonrpc.write_message_sync(message)
+
+    def _check_gates(self, request: dict) -> dict | None:
+        for gate in self._gates:
+            if gate.applies_to(request["method"]):
+                denial = gate.check(request)
+                if denial is not None:
+                    return denial
+        return None
+
+    def _handle_audit_resource_request(self, message: dict) -> dict:
+        """Answers a resources/read, resources/subscribe, or
+        resources/unsubscribe for a verimcp:// uri locally -- the caller has
+        already confirmed audit_resource.is_audit_uri() and that self._audit
+        is not None."""
+        uri = message.get("params", {}).get("uri", "")
+        method = message["method"]
+        if method == "resources/read":
+            return {"jsonrpc": "2.0", "id": message["id"], "result": audit_resource.read(uri, self._audit)}
+        if method == "resources/subscribe":
+            self._audit_subscribers.add(uri)
+        else:
+            self._audit_subscribers.discard(uri)
+        return {"jsonrpc": "2.0", "id": message["id"], "result": {}}
+
+    def _inject_audit_resources(self, message: dict) -> dict:
+        """Appends verimcp's own audit resources to a resources/list
+        response. If the backend errored (or doesn't support resources/list
+        at all), synthesize a bare success instead of forwarding the error --
+        the initialize capability patch already promised the Host that
+        resources/list works."""
+        entries = audit_resource.list_entries()
+        if "result" in message:
+            message["result"].setdefault("resources", []).extend(entries)
+            return message
+        return {"jsonrpc": message.get("jsonrpc", "2.0"), "id": message.get("id"), "result": {"resources": entries}}
+
+    def _record_audit(
+        self,
+        request: dict,
+        *,
+        outcome: str,
+        gate: dict | None = None,
+        verification: dict | None = None,
+        approval: dict | None = None,
+    ) -> None:
+        if self._audit is None:
+            return
+        params = request.get("params", {})
+        method = request.get("method")
+        target = params.get("uri", "") if method == "resources/read" else params.get("name", "")
+        arguments = params.get("arguments") if method == "tools/call" else None
+        self._audit.record(
+            method=method,
+            target=target,
+            arguments=arguments,
+            outcome=outcome,
+            gate=gate,
+            verification=verification,
+            approval=approval,
+        )
+        self._notify_audit_subscribers()
+
+    def _record_completed_audit(self, request: dict, response: dict, verifiers_run: list) -> None:
+        """Records a tools/call or resources/read that actually reached the
+        backend and got a response -- as opposed to one denied before ever
+        being forwarded, which _record_audit's other call sites handle
+        directly. Pulls the require_approval gate/approval info back off the
+        request dict if _handle_approval's accept path stashed it there."""
+        if self._audit is None:
+            return
+        meta = self._pending_approval_meta.pop(request.get("id"), {})
+        gate = meta.get("gate")
+        approval = meta.get("approval")
+
+        if not verifiers_run:
+            outcome = "forwarded"
+            verification = None
+        else:
+            is_error = "error" in response or bool(response.get("result", {}).get("isError"))
+            outcome = "verified_failed" if is_error else "verified_ok"
+            verification = {"verifiers": [type(v).__name__ for v in verifiers_run], "passed": not is_error}
+
+        self._record_audit(request, outcome=outcome, gate=gate, verification=verification, approval=approval)
+
+    def _notify_audit_subscribers(self) -> None:
+        for uri in (audit_resource.AUDIT_URI, audit_resource.CURRENT_SESSION_URI):
+            if uri in self._audit_subscribers:
+                jsonrpc.write_message_sync(
+                    {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
+                )
+
+    async def _handle_approval(self, request: dict, backend) -> None:
+        """Runs as a background task (see the require_approval dispatch in
+        _forward_host_to_backend) so the read loop stays free to read the
+        elicitation reply this coroutine is waiting on. Fails closed on
+        every non-approval outcome -- missing capability, decline, cancel,
+        timeout -- deliberately: a require_approval rule that silently
+        degrades to "allow" on any failure mode is inert without anyone
+        noticing. See docs/adr/0003-require-approval-via-elicitation.md."""
+        tool_name = request.get("params", {}).get("name", "")
+
+        if not self._host_supports_elicitation:
+            self._record_audit(
+                request,
+                outcome="denied",
+                gate={"action": "require_approval", "reason": "Host does not support elicitation"},
+                approval={"status": "unsupported"},
+            )
+            jsonrpc.write_message_sync(
+                RequestGate._deny(request, f"tool {tool_name!r} requires approval, but the Host does not support elicitation")
+            )
+            return
+
+        elicit_id = f"{_ELICITATION_ID_PREFIX}{next(self._next_elicitation_id)}"
+        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        self._pending_elicitations[elicit_id] = future
+        jsonrpc.write_message_sync({
+            "jsonrpc": "2.0",
+            "id": elicit_id,
+            "method": "elicitation/create",
+            "params": {
+                "message": f"verimcp policy requires approval before running tool {tool_name!r}.",
+                # Intentionally empty: the accept/decline/cancel action
+                # itself is the yes/no signal (per the elicitation spec's
+                # three-action model) -- no extra field needed to express it.
+                "requestedSchema": {"type": "object", "properties": {}},
+            },
+        })
+
+        try:
+            reply = await asyncio.wait_for(future, timeout=self._approval_timeout)
+        except TimeoutError:
+            self._pending_elicitations.pop(elicit_id, None)
+            self._record_audit(
+                request,
+                outcome="denied",
+                gate={"action": "require_approval", "reason": "approval timed out"},
+                approval={"status": "timeout"},
+            )
+            jsonrpc.write_message_sync(RequestGate._deny(request, f"approval request for tool {tool_name!r} timed out"))
+            return
+
+        action = reply.get("result", {}).get("action")
+        if action == "accept":
+            # Recorded once the backend's response actually arrives (see
+            # _record_completed_audit), not here -- that's the point where
+            # verification result is known too, so one combined entry covers
+            # gate + verification + approval instead of two partial ones.
+            if self._audit is not None:
+                self._pending_approval_meta[request["id"]] = {
+                    "gate": {"action": "require_approval", "reason": "approved by Host"},
+                    "approval": {"status": "accept"},
+                }
+            self._pending[request["id"]] = request
+            jsonrpc.write_message(backend.stdin, request)
+            await backend.stdin.drain()
+        else:
+            self._record_audit(
+                request,
+                outcome="denied",
+                gate={"action": "require_approval", "reason": f"approval was {action or 'not granted'}"},
+                approval={"status": action or "not_granted"},
+            )
+            jsonrpc.write_message_sync(
+                RequestGate._deny(request, f"approval for tool {tool_name!r} was {action or 'not granted'}")
+            )

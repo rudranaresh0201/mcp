@@ -17,19 +17,23 @@ async def _recv(proc) -> dict:
     return json.loads(line)
 
 
-async def _spawn_verimcp(repo_path: Path):
+async def _spawn_verimcp(repo_path: Path, verimcp_args: list[str] | None = None):
     return await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "verimcp.cli", "--",
+        sys.executable, "-m", "verimcp.cli", *(verimcp_args or []), "--",
         sys.executable, "-m", "devmcp.cli", "--repo-path", str(repo_path),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
     )
 
 
-async def _initialize(proc) -> None:
+async def _initialize(proc, capabilities: dict | None = None) -> None:
     await _send(proc, {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test-client", "version": "0"}},
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": capabilities or {},
+            "clientInfo": {"name": "test-client", "version": "0"},
+        },
     })
     await _recv(proc)  # initialize response, unused here
     await _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -181,6 +185,466 @@ async def test_fails_open_when_host_never_answers_roots(tmp_path: Path):
         assert response["id"] == 2
         assert response["result"]["isError"] is False
         assert (tmp_path / "notes.txt").read_text() == "hello"
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_policy_gate_denies_a_tool_call_before_it_ever_reaches_the_backend(tmp_path: Path):
+    """The mirror case of the sampling gate: tools/call is Host-originated,
+    so the policy check runs in _forward_host_to_backend, and a denial is
+    answered straight to the Host without the request ever reaching the
+    backend at all. Proven the strong way -- not just that the response
+    looks like a denial, but that write_file's real side effect (the file
+    on disk) never happened, meaning devmcp genuinely never ran the tool."""
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: write_file\n    action: deny\n")
+
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--policy-config", str(policy_file)])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        response = await _recv(proc)
+
+        assert response["id"] == 2
+        assert "error" in response
+        assert "denied by policy" in response["error"]["message"]
+        assert not (tmp_path / "notes.txt").exists()
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_policy_gate_allows_a_tool_with_no_matching_rule(tmp_path: Path):
+    """A --policy-config that only mentions other tools must not turn into
+    an accidental default-deny for everything else."""
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: run_ci_pipeline\n    action: deny\n")
+
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--policy-config", str(policy_file)])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        response = await _recv(proc)
+
+        assert response["result"]["isError"] is False
+        assert (tmp_path / "notes.txt").read_text() == "hello"
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_approval_gate_forwards_tool_call_after_host_accepts(tmp_path: Path):
+    """require_approval pauses the tools/call, sends a real elicitation/create
+    to the Host, and only forwards to the backend once the Host accepts --
+    proven the strong way, same as the deny tests: the file genuinely gets
+    written, not just a response that claims success."""
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: write_file\n    action: require_approval\n")
+
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--policy-config", str(policy_file)])
+    try:
+        await _initialize(proc, capabilities={"elicitation": {}})
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        elicitation = await _recv(proc)
+        assert elicitation["method"] == "elicitation/create"
+        assert "write_file" in elicitation["params"]["message"]
+
+        await _send(proc, {"jsonrpc": "2.0", "id": elicitation["id"], "result": {"action": "accept"}})
+        response = await _recv(proc)
+
+        assert response["id"] == 2
+        assert response["result"]["isError"] is False
+        assert (tmp_path / "notes.txt").read_text() == "hello"
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_approval_gate_denies_without_running_when_host_declines(tmp_path: Path):
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: write_file\n    action: require_approval\n")
+
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--policy-config", str(policy_file)])
+    try:
+        await _initialize(proc, capabilities={"elicitation": {}})
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        elicitation = await _recv(proc)
+        assert elicitation["method"] == "elicitation/create"
+
+        await _send(proc, {"jsonrpc": "2.0", "id": elicitation["id"], "result": {"action": "decline"}})
+        response = await _recv(proc)
+
+        assert response["id"] == 2
+        assert "error" in response
+        assert "decline" in response["error"]["message"]
+        assert not (tmp_path / "notes.txt").exists()
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_approval_gate_denies_when_host_cancels(tmp_path: Path):
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: write_file\n    action: require_approval\n")
+
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--policy-config", str(policy_file)])
+    try:
+        await _initialize(proc, capabilities={"elicitation": {}})
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        elicitation = await _recv(proc)
+
+        await _send(proc, {"jsonrpc": "2.0", "id": elicitation["id"], "result": {"action": "cancel"}})
+        response = await _recv(proc)
+
+        assert response["id"] == 2
+        assert "error" in response
+        assert "cancel" in response["error"]["message"]
+        assert not (tmp_path / "notes.txt").exists()
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_approval_gate_fails_closed_when_host_lacks_elicitation_capability(tmp_path: Path):
+    """A Host that never declared the elicitation capability must never even
+    receive an elicitation/create it can't answer -- verimcp denies
+    immediately instead of sending a request into the void."""
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: write_file\n    action: require_approval\n")
+
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--policy-config", str(policy_file)])
+    try:
+        await _initialize(proc)  # no elicitation capability declared
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        response = await _recv(proc)
+
+        assert response["id"] == 2
+        assert "error" in response
+        assert "elicitation" in response["error"]["message"]
+        assert not (tmp_path / "notes.txt").exists()
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_approval_gate_fails_closed_on_timeout(tmp_path: Path):
+    """First timing-sensitive test in this suite. Margin kept generous
+    (0.3s) relative to plausible CI scheduling jitter, and the eventual
+    denial recv relies on pytest's global 30s timeout as the outer safety
+    net so a genuinely broken feature fails the test instead of hanging."""
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: write_file\n    action: require_approval\n")
+
+    proc = await _spawn_verimcp(
+        tmp_path, verimcp_args=["--policy-config", str(policy_file), "--approval-timeout", "0.3"]
+    )
+    try:
+        await _initialize(proc, capabilities={"elicitation": {}})
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        elicitation = await _recv(proc)
+        assert elicitation["method"] == "elicitation/create"
+        # deliberately never answered
+
+        response = await _recv(proc)
+
+        assert response["id"] == 2
+        assert "error" in response
+        assert "timed out" in response["error"]["message"]
+        assert not (tmp_path / "notes.txt").exists()
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_sampling_gate_denies_backend_once_rate_limit_exceeded(tmp_path: Path):
+    """sampling/createMessage is the first *backend-initiated* request a
+    RequestGate acts on -- unlike a Verifier, it's checked before the Host
+    ever sees it. First summarize_diff call goes through and the Host
+    answers it for real; the second is denied by verimcp itself, so the
+    Host never receives a second sampling/createMessage at all, and devmcp's
+    own exception handling turns the denial into a normal isError result."""
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--sampling-limit", "1", "--sampling-window", "60"])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "summarize_diff", "arguments": {"diff": "+ added a line"}},
+        })
+        sampling_request = await _recv(proc)
+        assert sampling_request["method"] == "sampling/createMessage"
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": sampling_request["id"],
+            "result": {"content": {"type": "text", "text": "Adds a line."}},
+        })
+        first_response = await _recv(proc)
+        assert first_response["result"]["isError"] is False
+        assert first_response["result"]["content"][0]["text"] == "Adds a line."
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "summarize_diff", "arguments": {"diff": "+ added another line"}},
+        })
+        second_response = await _recv(proc)
+
+        assert second_response["id"] == 3
+        assert second_response["result"]["isError"] is True
+        assert "rate limit" in second_response["result"]["content"][0]["text"]
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_audit_log_records_and_exposes_a_forwarded_tool_call(tmp_path: Path):
+    """Phase 3: a completed tools/call gets recorded on disk *and* is
+    readable back through the real MCP resources/list + resources/read flow
+    -- not just written to a file nobody's proven the Host can actually see."""
+    audit_path = tmp_path / "audit.jsonl"
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--audit-log", str(audit_path)])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        response = await _recv(proc)
+        assert response["result"]["isError"] is False
+
+        await _send(proc, {"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}})
+        listing = await _recv(proc)
+        uris = {r["uri"] for r in listing["result"]["resources"]}
+        assert "verimcp://audit" in uris
+        assert "verimcp://audit/current" in uris
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 4, "method": "resources/read",
+            "params": {"uri": "verimcp://audit/current"},
+        })
+        read_response = await _recv(proc)
+        lines = [json.loads(line) for line in read_response["result"]["contents"][0]["text"].splitlines() if line.strip()]
+        assert len(lines) == 1
+        assert lines[0]["method"] == "tools/call"
+        assert lines[0]["target"] == "write_file"
+        assert lines[0]["arguments"] == {"path": "notes.txt", "content": "hello"}
+        assert lines[0]["outcome"] == "verified_ok"
+
+        on_disk = [json.loads(line) for line in audit_path.read_text().splitlines() if line.strip()]
+        assert len(on_disk) == 1
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_audit_log_records_a_policy_denied_tool_call(tmp_path: Path):
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: write_file\n    action: deny\n")
+    audit_path = tmp_path / "audit.jsonl"
+
+    proc = await _spawn_verimcp(
+        tmp_path, verimcp_args=["--policy-config", str(policy_file), "--audit-log", str(audit_path)]
+    )
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        response = await _recv(proc)
+        assert "error" in response
+
+        entries = [json.loads(line) for line in audit_path.read_text().splitlines() if line.strip()]
+        assert len(entries) == 1
+        assert entries[0]["outcome"] == "denied"
+        assert entries[0]["gate"]["action"] == "deny"
+        assert "denied by policy" in entries[0]["gate"]["reason"]
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_audit_log_records_approval_accept(tmp_path: Path):
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: write_file\n    action: require_approval\n")
+    audit_path = tmp_path / "audit.jsonl"
+
+    proc = await _spawn_verimcp(
+        tmp_path, verimcp_args=["--policy-config", str(policy_file), "--audit-log", str(audit_path)]
+    )
+    try:
+        await _initialize(proc, capabilities={"elicitation": {}})
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        elicitation = await _recv(proc)
+        await _send(proc, {"jsonrpc": "2.0", "id": elicitation["id"], "result": {"action": "accept"}})
+        response = await _recv(proc)
+        assert response["result"]["isError"] is False
+
+        entries = [json.loads(line) for line in audit_path.read_text().splitlines() if line.strip()]
+        assert len(entries) == 1
+        assert entries[0]["outcome"] == "verified_ok"
+        assert entries[0]["gate"] == {"action": "require_approval", "reason": "approved by Host"}
+        assert entries[0]["approval"] == {"status": "accept"}
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_audit_log_records_approval_decline(tmp_path: Path):
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("rules:\n  - tool: write_file\n    action: require_approval\n")
+    audit_path = tmp_path / "audit.jsonl"
+
+    proc = await _spawn_verimcp(
+        tmp_path, verimcp_args=["--policy-config", str(policy_file), "--audit-log", str(audit_path)]
+    )
+    try:
+        await _initialize(proc, capabilities={"elicitation": {}})
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+        elicitation = await _recv(proc)
+        await _send(proc, {"jsonrpc": "2.0", "id": elicitation["id"], "result": {"action": "decline"}})
+        response = await _recv(proc)
+        assert "error" in response
+
+        entries = [json.loads(line) for line in audit_path.read_text().splitlines() if line.strip()]
+        assert len(entries) == 1
+        assert entries[0]["outcome"] == "denied"
+        assert entries[0]["approval"] == {"status": "decline"}
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_audit_subscribe_fires_update_notification_after_a_tool_call(tmp_path: Path):
+    """resources/subscribe on verimcp://audit/current, answered locally
+    (never forwarded to devmcp), then a real notifications/resources/updated
+    after the next recorded call -- proven over the real pipe, not just that
+    the subscriber set gets mutated."""
+    audit_path = tmp_path / "audit.jsonl"
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--audit-log", str(audit_path)])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "resources/subscribe",
+            "params": {"uri": "verimcp://audit/current"},
+        })
+        sub_response = await _recv(proc)
+        assert sub_response["result"] == {}
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "notes.txt", "content": "hello"}},
+        })
+
+        notification = await _recv(proc)
+        assert notification["method"] == "notifications/resources/updated"
+        assert notification["params"]["uri"] == "verimcp://audit/current"
+
+        tool_response = await _recv(proc)
+        assert tool_response["id"] == 3
     finally:
         proc.terminate()
         await proc.wait()

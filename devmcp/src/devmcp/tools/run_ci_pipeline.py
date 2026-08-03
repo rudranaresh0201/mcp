@@ -34,9 +34,14 @@ class RunCiPipelineTool(Tool):
         for step in arguments["steps"]:
             # blocking subprocess call -- must not run on the event loop directly,
             # or every other in-flight request would stall for the step's duration.
+            # stdin=DEVNULL: same reason as git_ops._run -- devmcp's own real stdin
+            # is read on a background thread, and an inheriting child can deadlock
+            # against it on Windows, now that tool calls run concurrently with the
+            # main dispatch loop's next read.
             proc = await asyncio.to_thread(
                 subprocess.run,
                 step["cmd"], shell=True, cwd=ctx.repo_root, capture_output=True, text=True, check=False,
+                stdin=subprocess.DEVNULL,
             )
             passed = proc.returncode == 0
             overall_ok = overall_ok and passed
