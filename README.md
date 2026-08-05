@@ -60,6 +60,13 @@ verimcp -- devmcp --repo-path ./some-repo
 > Python import and CLI command are both still plain `devmcp` — nothing above changes
 > if you're reading devmcp's own source.
 
+**In Docker** — no local Python/git needed:
+
+```bash
+docker build -t verimcp-devmcp .
+docker run -i -v /path/to/your/repo:/repo verimcp-devmcp
+```
+
 **As a contributor** — editable installs from this repo:
 
 ```bash
