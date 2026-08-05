@@ -1,5 +1,7 @@
 # devmcp
 
+<!-- mcp-name: io.github.rudranaresh0201/devmcp -->
+
 A from-scratch MCP server exposing git and CI tooling over the **full**
 protocol surface — tools, resources with live push subscriptions, prompts,
 roots negotiation, and sampling — not just the tools primitive most example
@@ -30,6 +32,13 @@ Run `devmcp --repo-path ./some-repo` and it:
   LLM API key, it borrows whatever model the Host already has
 
 ## Getting started
+
+```bash
+pip install devmcp-server   # PyPI distribution name -- CLI/import are still plain `devmcp`
+devmcp --repo-path ./some-repo
+```
+
+Contributing to this repo instead:
 
 ```bash
 pip install -e ".[dev]"

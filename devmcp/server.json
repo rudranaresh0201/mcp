@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.rudranaresh0201/devmcp",
+  "title": "devmcp",
+  "description": "Git/CI MCP server with the full protocol surface (tools, resources, prompts, roots, sampling).",
+  "websiteUrl": "https://github.com/rudranaresh0201/mcp/tree/main/devmcp#readme",
+  "repository": {
+    "url": "https://github.com/rudranaresh0201/mcp",
+    "source": "github"
+  },
+  "version": "0.2.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "devmcp-server",
+      "version": "0.2.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--repo-path",
+          "isRequired": true,
+          "description": "Local git repo this server operates on",
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.rudranaresh0201/verimcp",
+  "title": "verimcp",
+  "description": "Transparent MCP proxy that independently re-verifies tool-call claims before the Host trusts them.",
+  "websiteUrl": "https://github.com/rudranaresh0201/mcp#readme",
+  "repository": {
+    "url": "https://github.com/rudranaresh0201/mcp",
+    "source": "github"
+  },
+  "version": "0.2.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "verimcp",
+      "version": "0.2.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

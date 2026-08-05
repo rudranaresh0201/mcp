@@ -1,9 +1,13 @@
 # A trusted agent stack for MCP
 
+<!-- mcp-name: io.github.rudranaresh0201/verimcp -->
+
 [![PyPI - verimcp](https://img.shields.io/pypi/v/verimcp?label=verimcp)](https://pypi.org/project/verimcp/)
 [![PyPI - devmcp-server](https://img.shields.io/pypi/v/devmcp-server?label=devmcp-server)](https://pypi.org/project/devmcp-server/)
 [![CI](https://github.com/rudranaresh0201/mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rudranaresh0201/mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/?search=rudranaresh0201) as `io.github.rudranaresh0201/verimcp` and `io.github.rudranaresh0201/devmcp`.
 
 ## Problem
 

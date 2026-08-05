@@ -1,6 +1,6 @@
 [project]
 name = "devmcp-server"
-version = "0.2.0"
+version = "0.2.1"
 description = "A from-scratch MCP server exposing git and CI tooling over the full protocol surface (tools, resources, prompts, roots, sampling)."
 readme = "README.md"
 license = {file = "LICENSE"}

@@ -5,6 +5,27 @@ versions apply to both `verimcp` and `devmcp`, which are versioned in
 lockstep since they've evolved together, despite having no import
 dependency on each other.
 
+## [0.2.1]
+
+### Added
+
+- Both packages published on PyPI: `verimcp` and `devmcp-server` (`devmcp`'s
+  PyPI distribution name — blocked by a typosquat-similarity check against
+  an unrelated existing package; the Python import and CLI command are
+  still plain `devmcp`).
+- `scripts/demo.py` — a real, runnable end-to-end demo: verimcp fronting a
+  deliberately-lying backend (caught) and the real devmcp (verified and
+  passed through), printing the raw JSON-RPC exchange.
+- `mcp-name` ownership markers in both READMEs for the official MCP
+  Registry (`registry.modelcontextprotocol.io`).
+
+### Fixed
+
+- `write_file`'s path-escape check (added in 0.2.0's VS Code testing) only
+  actually worked on Windows — `Path("C:/foo").is_absolute()` is `False`
+  on POSIX, so a Linux-hosted devmcp still accepted Windows-style absolute
+  paths. Now detected by string shape, independent of host OS.
+
 ## [0.2.0]
 
 ### Added — verimcp
