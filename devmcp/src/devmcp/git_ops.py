@@ -1,7 +1,16 @@
 """Real subprocess wrappers around git. No mocking: verimcp's whole premise
 is checking real side effects, so devmcp's tools must produce real ones."""
+import re
 import subprocess
 from pathlib import Path
+
+# Matches a Windows-style absolute path (C:\..., C:/..., \\server\share) by
+# string shape, independent of the host OS's own pathlib semantics. On POSIX,
+# Path("C:/foo").is_absolute() is False -- a colon is just an ordinary
+# character to a POSIX filesystem -- so a Linux-hosted devmcp would otherwise
+# accept "C:/Windows/System32/evil.txt" as a harmless-looking relative path
+# and nest it under repo_root instead of rejecting it.
+_WINDOWS_ABS_PATH_RE = re.compile(r"^[A-Za-z]:[/\\]|^\\\\")
 
 
 class GitError(RuntimeError):
@@ -33,6 +42,8 @@ def ensure_repo(repo_root: Path) -> None:
 
 
 def write_file(repo_root: Path, path: str, content: str) -> None:
+    if _WINDOWS_ABS_PATH_RE.match(path):
+        raise ValueError(f"path {path!r} resolves outside repo root {repo_root}")
     repo_root = repo_root.resolve()
     file_path = (repo_root / path).resolve()
     if not file_path.is_relative_to(repo_root):
