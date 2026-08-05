@@ -33,7 +33,10 @@ def ensure_repo(repo_root: Path) -> None:
 
 
 def write_file(repo_root: Path, path: str, content: str) -> None:
-    file_path = repo_root / path
+    repo_root = repo_root.resolve()
+    file_path = (repo_root / path).resolve()
+    if not file_path.is_relative_to(repo_root):
+        raise ValueError(f"path {path!r} resolves outside repo root {repo_root}")
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content)
 

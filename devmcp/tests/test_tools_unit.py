@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 
+import pytest
 from devmcp.context import ServerContext
 from devmcp.tools.git_branch import GitBranchTool
 from devmcp.tools.git_commit import GitCommitTool
@@ -15,6 +16,22 @@ async def test_write_file_tool_writes_real_file(tmp_git_repo):
 
     assert result["isError"] is False
     assert (tmp_git_repo / "hello.txt").read_text() == "hi"
+
+
+@pytest.mark.parametrize("escaping_path", [
+    "C:/Windows/System32/evil.txt",  # Windows absolute path, real bug found via VS Code testing:
+    # devmcp silently dropped the drive letter and nested the rest under repo_root instead of
+    # rejecting it -- e.g. a client asking to write "C:/foo/bar.txt" landed at
+    # "<repo_root>/foo/bar.txt", not "C:/foo/bar.txt" and not an error either.
+    "/etc/passwd",  # POSIX-style absolute path
+    "../../outside.txt",  # relative traversal above repo_root
+])
+async def test_write_file_tool_rejects_paths_outside_repo_root(tmp_git_repo, escaping_path):
+    ctx = ServerContext(repo_root=tmp_git_repo, connection=None)
+
+    result = await WriteFileTool().call({"path": escaping_path, "content": "hi"}, ctx)
+
+    assert result["isError"] is True
 
 
 async def test_git_commit_tool_creates_real_commit(tmp_git_repo):

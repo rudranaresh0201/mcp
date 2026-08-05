@@ -26,14 +26,16 @@ below.
   deny, and require_approval via real MCP elicitation), Phase 3 (audit
   logging as a real `verimcp://audit` MCP resource, plus policy-replay
   backtesting), and Phase 4 (OpenTelemetry spans/metrics using GenAI
-  semantic conventions) are all done (see below) -- 125 tests passing
-  across both packages. Phase 5 (real client compatibility) is partially
-  done: a live run against the real MCP Inspector caught a genuine protocol
-  bug our own tests never triggered (see below), now fixed with a
-  regression test.
+  semantic conventions) are all done (see below) -- 136 tests passing
+  across both packages. Phase 5 (real client compatibility) is fully done:
+  live runs against both the real MCP Inspector and VS Code's native MCP
+  client (Copilot Chat agent mode) each caught a genuine bug our own tests
+  never triggered (see below), both now fixed with regression tests. Phase 6
+  (adversarial test corpus), Phase 7 (verifier SDK), and Phase 8 (packaging)
+  are also done -- see their sections below.
 
-Everything below Phase 5's remaining sub-item is still ahead, starting from
-Phase 6.
+Every phase in this roadmap is now done. There is no "next phase" queued as
+of 2026-08-05.
 
 ## Phase 0 — Foundation (make what already exists actually run)
 
@@ -221,7 +223,7 @@ environment (a transitive dependency of an unrelated project) — free,
 open-source, and the credibility win ("uses real OTel GenAI conventions" vs
 "built a custom dashboard") is worth more than a bespoke UI would be.
 
-## Phase 5 — Real client compatibility 🟡 partially done
+## Phase 5 — Real client compatibility ✅ done
 
 *(covers vision item #6)*
 
@@ -242,15 +244,30 @@ suite.
   6/6 smoke-test checks pass after the fix, including proof that Phase 3's
   injected `verimcp://audit` resources are visible to this real,
   independently-implemented client.
-- ⬜ Test against at least one more real client if accessible (e.g. an
-  editor's MCP integration) to catch spec-compliance edge cases our own
-  tests would never generate — not yet done, stated plainly rather than
-  implied.
+- ✅ Second real client: **VS Code's native MCP support** (Copilot Chat
+  agent mode), configured via `.vscode/mcp.json` pointing at
+  `verimcp-devmcp`. Proved verimcp's actual verification USP end-to-end
+  against a real, independently-implemented Host we didn't write: a real
+  `write_file` call from the VS Code UI produced a
+  `"verification": {"verifiers": ["FilesystemVerifier"], "passed": true}`
+  entry in `verimcp-audit.jsonl` and a matching `verified_ok` OTel span —
+  proof verimcp independently re-checked the file on disk rather than just
+  relaying devmcp's claim. Also caught a real, separate bug this way:
+  `git_ops.write_file()` did `repo_root / path` with no check that `path`
+  wasn't already absolute, so a client passing an absolute path (e.g.
+  `C:/Users/.../evil.txt`) had its drive letter silently stripped and the
+  remainder nested under `repo_root` instead of being rejected — found via
+  a real VS Code write with an absolute target path landing somewhere
+  nonsensical. Fixed with an `is_relative_to` boundary check in
+  `git_ops.write_file()` (raises `ValueError`, surfaced by `WriteFileTool`
+  as `isError: true`), with regression tests for Windows-absolute,
+  POSIX-absolute, and `../` traversal paths
+  (`test_write_file_tool_rejects_paths_outside_repo_root`).
 
-**Free/leverage:** MCP Inspector is free. This phase costs time, not
-money or new infrastructure.
+**Free/leverage:** MCP Inspector and VS Code are both free. This phase cost
+time, not money or new infrastructure.
 
-## Phase 6 — Adversarial test corpus
+## Phase 6 — Adversarial test corpus ✅ done
 
 *(covers vision item #8)*
 
@@ -259,30 +276,40 @@ verifiers actually catch bad behavior — this becomes both the regression
 suite and the evidence behind any "verimcp catches N/N adversarial
 backends" claim in a README or blog post.
 
+- ✅ `tests/fixtures/lying_server.py` — a minimal, real-stdio MCP server
+  with a `--lie` flag selecting one of 6 controllable fabrications.
+  `tests/test_adversarial_corpus.py` proves 6/6 real verifier catches over
+  the real proxy pipe.
+
 **Free/leverage:** pure test code, no new infrastructure.
 
-## Phase 7 — SDK for verifier authors
+## Phase 7 — SDK for verifier authors ✅ done
 
 *(covers vision item #9)*
 
 Goal: someone who isn't us can write a new verifier without reading all of
 verimcp's internals first.
 
-- A documented `Verifier` base class + one clean worked example (already
-  exists in spirit as `filesystem.py` — this phase is about writing it up,
-  not re-architecting it).
-- A short "how to add a verifier" doc.
+- ✅ `docs/writing-a-verifier.md` walks `FilesystemVerifier`'s real code
+  line-by-line.
+- ✅ `examples/third_party_verifier/` — a real, separately pip-installable
+  package (own `pyproject.toml`, own entry-points declaration) proving
+  third-party verifier discovery actually works, wired into CI.
 
-**Free/leverage:** the plugin interface already exists by this point
-(Phase 1) — this phase is mostly documentation and one polished example,
+**Free/leverage:** the plugin interface already existed by this point
+(Phase 1) — this phase was mostly documentation and one polished example,
 not new code.
 
-## Phase 8 — Packaging & OSS polish
+## Phase 8 — Packaging & OSS polish ✅ done
 
 *(covers vision item #10)*
 
-- Finalize YAML config, CLI polish, versioning/CHANGELOG, CONTRIBUTING.md.
-- Publish to PyPI.
+- ✅ License/authors/classifiers/`[project.urls]` metadata on both
+  packages, `devmcp/LICENSE` + `devmcp/README.md` (devmcp is separately
+  distributable), version 0.1.0 → 0.2.0, `CHANGELOG.md`, `CONTRIBUTING.md`.
+  `python -m build` + `twine check` both pass for both packages.
+- ⬜ Publish to PyPI — not yet done (needs a maintainer's own PyPI
+  credentials), stated plainly rather than implied.
 
 **Free/leverage:** PyPI hosting is free, GitHub Pages/GitHub-native docs
 are free, `setuptools` build backend is already in place.

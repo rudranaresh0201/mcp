@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "verimcp-devmcp": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "-m", "verimcp.cli",
+        "--audit-log", "${workspaceFolder}/verimcp-audit.jsonl",
+        "--otel-exporter", "console",
+        "--",
+        "python", "-m", "devmcp.cli", "--repo-path", "${workspaceFolder}/.vscode-sandbox"
+      ]
+    }
+  }
+}

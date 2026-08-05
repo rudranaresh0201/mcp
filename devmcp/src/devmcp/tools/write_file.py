@@ -20,7 +20,10 @@ class WriteFileTool(Tool):
     async def call(self, arguments: dict[str, Any], ctx: ServerContext) -> dict[str, Any]:
         path = arguments["path"]
         content = arguments["content"]
-        git_ops.write_file(ctx.repo_root, path, content)
+        try:
+            git_ops.write_file(ctx.repo_root, path, content)
+        except ValueError as exc:
+            return {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
         return {
             "isError": False,
             "content": [{"type": "text", "text": f"wrote {len(content)} bytes to {path}"}],
