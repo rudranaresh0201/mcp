@@ -5,69 +5,42 @@
 [![CI](https://github.com/rudranaresh0201/mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/rudranaresh0201/mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Because `isError: false` only means a tool didn't crash, not that it told the truth — and an agent operating across git, CI, and infrastructure needs more than hope that its tools are honest.**
+## Problem
 
-## The USP, in one proof
+MCP tool calls are trusted by default. When a server says a commit succeeded, a file was written, or a CI check passed, the Host has no way to know if that's true — `isError: false` only means the tool didn't crash, not that it did what it claimed. An agent wired up to git, CI, or infrastructure through MCP is one confidently-wrong tool response away from acting on a lie.
 
-`verimcp` is a transparent MCP proxy that **independently re-derives ground truth** for the tool calls passing through it, instead of just relaying whatever the backend claims. It's the only difference between a Host that *hopes* its tools are honest and one that *checks*.
+## Solution
+
+**`verimcp`** is a transparent proxy that sits between an MCP Host and a backend server. It forwards every message unchanged, except: for calls it knows how to check, it independently re-derives the real outcome (re-reads the file, re-checks the git log, re-runs the safe parts of a CI step) and compares that against what the backend claimed. A lie gets rewritten into a real error before the Host ever sees it as a success.
+
+**`devmcp`** is the backend it's proven against — a real git/CI MCP server, deliberately built with the full protocol surface (tools, resources, prompts, roots, sampling), because a proxy is only as convincing as what it's shown catching.
+
+```
+Host  <--stdio-->  verimcp (proxy + verification)  <--stdio-->  devmcp (git/CI server)
+```
+
+Both are independently installable and have no import dependency on each other — `verimcp` works in front of *any* MCP backend (proven against the official `mcp-server-git` too, not just devmcp), and `devmcp` works with any Host directly, unproxied.
+
+## See it work
 
 ```bash
 pip install verimcp devmcp-server
-
-# front devmcp with verimcp, point any MCP Host at this instead of devmcp directly
-verimcp -- devmcp --repo-path ./some-repo
+python scripts/demo.py
 ```
 
-Proven, not asserted: `tests/test_adversarial_corpus.py` spins up a real MCP server that deliberately lies — a fabricated commit hash, a branch that was never created, a CI step falsely claimed to pass, a made-up resource read, a wrong-shape fake commit, a file write that never touched disk — and drives all six through the real `verimcp` proxy over a real stdio pipe. **verimcp catches 6/6.** No mocks, no hand-built response dicts — a real lying process, a real proxy, a real rejection.
+That spins up two real subprocess pipes and prints the raw JSON-RPC exchange: one where a backend fabricates a commit hash and verimcp catches it (`isError: true`, with the real reason), one where a backend writes a real file and verimcp's independent check confirms it and lets the response through unchanged. No mocks — real git repos, real subprocesses, real proxy.
 
-This repo is two packages that only make sense together:
+The same claim, proven at larger scale: `tests/test_adversarial_corpus.py` runs 6 different fabrications (fake commit, fake branch, false CI pass, fake resource read, wrong-shape fake commit, a write that never touched disk) through the real proxy pipe. **verimcp catches 6/6.**
 
-- **`devmcp`** — a broad, verifiable-by-design MCP server. Every domain it covers (git and CI today, expanding per [ADR 0002](docs/adr/0002-devmcp-broad-verifiable-server.md)) is deliberately implemented across the *full* MCP protocol surface (tools, resources with push subscriptions, prompts, roots negotiation, sampling), and every tool ships with a stated, independently-checkable postcondition rather than an implicit "trust me."
-- **`verimcp`** — the trust engine. It sits between an MCP Host and a backend server, forwards everything transparently, and independently re-derives ground truth for the calls it has a verifier for before letting the response through. Verification is the first trust primitive; policy enforcement, audit logging, and observability (see [ROADMAP](docs/ROADMAP.md)) are the same idea applied to allow/deny, provenance, and visibility.
+## Technical summary
 
-Neither half is the point on its own. A broad tool server without verification is just another dev-tool MCP server; a verification engine with nothing real to verify is a proof of concept. Together, the pitch is: **an agent operating through this stack cannot get away with a false claim, an unapproved action, or an unlogged side effect.**
+- **Correctness verifiers** — one per tool/resource with an independently-checkable postcondition: `write_file` (disk hash-compare), `git_commit`/`git_branch` (re-derived from real git state), `run_ci_pipeline` (self-consistency + re-execution of steps marked safe to re-run), plus resource reads (`repo://status`, `repo://log`, `repo://file/{path}`). New verifiers are a plugin system (`importlib.metadata.entry_points`, the same mechanism pytest/Black use) — see [`docs/writing-a-verifier.md`](docs/writing-a-verifier.md).
+- **Policy gates** — allow/deny/require-approval rules evaluated *before* a call reaches the backend, for the calls that have no objective truth to check (sampling rate limits, arbitrary tool-name/argument policy via YAML, human-in-the-loop approval over real MCP `elicitation/create`).
+- **Audit + replay** — every call verimcp handles is logged and served back as a real `verimcp://audit` MCP resource; `verimcp replay` re-runs recorded traffic against a new policy to backtest "would this have changed anything."
+- **Observability** — every call gets an OpenTelemetry span/metric using the GenAI semantic conventions, exportable to any OTLP collector.
+- **Proven against real clients, not just our own tests** — the official MCP Inspector and VS Code's native MCP support (Copilot Chat) each caught a real bug our own test suite never triggered, now fixed with regression tests.
 
-```
-Host  <--stdio-->  verimcp (proxy + verification engine)  <--stdio-->  devmcp (git/CI server)
-```
-
-Both packages are independently installable and have **no import dependency on each other** — `devmcp` is a standalone MCP server usable by any Host, and `verimcp` is a general-purpose proxy usable in front of any backend server, not just `devmcp`. They're proven together only via the end-to-end tests.
-
-## Status
-
-| Milestone | What it is | Status |
-|---|---|---|
-| M0 | devmcp scaffolding, CI, verify-vs-don't design ADR | ✅ done |
-| M1 | devmcp core: transport, `initialize`, git tools (`write_file`, `git_commit`, `git_branch`, `run_ci_pipeline`) | ✅ done |
-| M2 | devmcp resources (`repo://status`, `repo://log`, `repo://file/{path}`, `ci://last-run`), push subscriptions, prompts | ✅ done |
-| M3 | devmcp roots negotiation + sampling (`summarize_diff`) — the two directions where devmcp asks the *Client* something | ✅ done |
-| M4 | verimcp's generalized verifier engine: `GitCommitVerifier`, `GitBranchVerifier`, `CIRunVerifier`, `ResourceReadVerifier`, plus a `SamplingRateLimitGate` policy gate for `sampling/createMessage` | ✅ done |
-| M5 | verimcp's own served capability — an audit log of every `tools/call`/`resources/read` it handles (`verimcp://audit`, `verimcp://audit/current`, live `resources/subscribe` updates), plus `verimcp replay` policy backtesting | ✅ done |
-| M6 | OpenTelemetry spans + metrics (GenAI semantic conventions) for every `tools/call`/`resources/read`, exportable to console or any OTLP collector (Jaeger, Grafana) | ✅ done |
-| M7 | Real-client verification against MCP Inspector (`scripts/inspector_smoke_test.py`) — caught and fixed a real `resources/list` id-collision bug our own tests never triggered | ✅ done |
-| M8 | Packaging: published on PyPI as [`verimcp`](https://pypi.org/project/verimcp/) and [`devmcp-server`](https://pypi.org/project/devmcp-server/) (`devmcp`'s PyPI name, see note in Getting Started), license/authors/classifiers/urls metadata, `CHANGELOG.md`, `CONTRIBUTING.md` | ✅ done |
-| M9 | Adversarial test corpus — a real, deliberately-lying MCP server fixture (`tests/fixtures/lying_server.py`), driven through the real proxy pipe to prove every verifier actually catches the lie it exists for | ✅ done |
-| M10 | Verifier SDK — `docs/writing-a-verifier.md` plus a real, independently pip-installable example plugin package (`examples/third_party_verifier/`) proving third-party discovery works | ✅ done |
-| M11 | Second real-client verification against **VS Code's native MCP support** (Copilot Chat agent mode, `.vscode/mcp.json`) — proved verimcp's independent re-verification (not just relay) against a real Host we didn't write, and caught/fixed a real absolute-path escape bug in `write_file` | ✅ done |
-
-`devmcp` is fully built and independently working today: real `initialize` handshake, five tools, resources with live subscriptions, two prompts, roots negotiation, and sampling — all proven end-to-end over real stdio, not mocked. `verimcp` now has a verifier for every tool call and resource read with an independently-checkable postcondition — `write_file` (filesystem hash-compare), `git_commit` (commit-object existence), `git_branch` (ref existence + target), `run_ci_pipeline` (per-step self-consistency plus re-execution of steps marked safe to re-run), and `repo://status`/`repo://log`/`repo://file/{path}` (re-derive the same git/filesystem state and compare) — plus a `RequestGate` for the one primitive with no ground truth to check: `sampling/createMessage` is now rate-limited (`--sampling-limit`/`--sampling-window`) before it ever reaches the Host, closing out M4.
-
-## Why this split
-
-Every MCP primitive gets one of three treatments, decided in [`docs/adr/0001-verify-vs-dont-framework.md`](docs/adr/0001-verify-vs-dont-framework.md):
-
-- **Correctness verifiers** (tools, resources) — re-derive ground truth independently and compare it to the claim.
-- **Policy gates** (sampling rate-limiting; tools/call allow/deny/require_approval, see [ROADMAP Phase 2](docs/ROADMAP.md)) — no objective truth to check, but a real cost/abuse/authorization surface worth constraining before the backend ever runs.
-- **No verifier, on principle** (prompts, roots) — nothing independent to check them against; treating them as "unverified" is a decision, not an oversight.
-
-## What devmcp actually does
-
-Run `devmcp --repo-path ./some-repo` and it:
-- answers `tools/call` for `write_file`, `git_commit`, `git_branch`, `run_ci_pipeline` (each producing a real, independently-checkable side effect on disk / in git)
-- serves `resources/read` for live repo state, and pushes `notifications/resources/updated` unprompted when a subscribed resource changes
-- serves `prompts/get` for `commit-message` and `pr-description` templates
-- on startup, asks the *Client* `roots/list` and relocates its own working directory to whatever the Client declares, rather than trusting its own CLI flag blindly
-- for `summarize_diff`, asks the *Client's own model* to do the summarization via `sampling/createMessage`, since devmcp has no model of its own
+Deeper design reasoning (why prompts/roots get no verifier on principle, why policy is a separate concept from verification, etc.) lives in [`docs/adr/`](docs/adr/) for anyone who wants to go that deep — the summary above is everything needed to use or evaluate the project.
 
 ## Getting started
 
@@ -95,39 +68,18 @@ ruff check src tests devmcp/src devmcp/tests
 python scripts/inspector_smoke_test.py   # verify against the real MCP Inspector client (needs node/npx)
 ```
 
-## Writing a verifier
-
-Verifiers are a plugin system (`importlib.metadata.entry_points`, the same
-mechanism pytest/Black use) — a new one can be added without touching
-verimcp's own source. See [`docs/writing-a-verifier.md`](docs/writing-a-verifier.md)
-for the full guide, and [`examples/third_party_verifier/`](examples/third_party_verifier)
-for a real, independently pip-installable package proving it — install it
-and `tests/test_third_party_verifier_plugin.py` confirms `load_verifiers()`
-picks it up automatically.
-
-## Observability
-
-Every `tools/call`/`resources/read` verimcp handles gets an OpenTelemetry
-span (named after the [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) --
-`gen_ai.operation.name`, `gen_ai.tool.name` -- plus verimcp-specific
-`verimcp.outcome`/`verimcp.gate.action`/`verimcp.verification.passed`/
-`verimcp.approval.status` attributes for governance data the standard
-doesn't cover) and contributes to two metrics: `verimcp.tool_calls.total`
-and `verimcp.policy_violations.total`, plus a `gen_ai.client.operation.duration`
-histogram. See [ADR 0005](docs/adr/0005-metrics-via-otel-genai-conventions.md).
-
-Omit `--otel-exporter` entirely for zero telemetry overhead (the default --
-no behavior change, same as every other opt-in flag here). To see it:
+## Try the observability yourself
 
 ```bash
-# local debugging -- spans/metrics print to stderr (never stdout, which is
-# the live MCP protocol channel)
+# spans/metrics print to stderr (verimcp's stdout is the live MCP protocol channel)
 verimcp --otel-exporter console -- devmcp --repo-path ./some-repo
 
-# point a real collector, Jaeger, or Grafana Agent at it
+# or point a real collector, Jaeger, or Grafana Agent at it
 pip install "verimcp[otel]"
 verimcp --otel-exporter otlp --otel-endpoint localhost:4317 -- devmcp --repo-path ./some-repo
 ```
+
+Omitting `--otel-exporter` entirely means zero telemetry overhead — the default, same as every other opt-in flag here.
 
 ## Contributing
 
