@@ -87,6 +87,17 @@ def main() -> int:
         "Omit for no audit logging at all (existing behavior).",
     )
     parser.add_argument(
+        "--idempotent-replay",
+        action="store_true",
+        help="Verify-before-retry (arxiv 2608.02645): if a tools/call is a byte-identical "
+        "retry of a call already independently verified true this session, answer from that "
+        "confirmed result instead of forwarding to the backend again -- prevents duplicate "
+        "side effects (e.g. a second git commit) from a client that retries after an "
+        "ambiguous response. Only ever applies to tools with a verifier configured; a call "
+        "with no verifier is always forwarded, same as today. Omit for no change to existing "
+        "behavior (every retry is re-executed).",
+    )
+    parser.add_argument(
         "--otel-exporter",
         choices=["console", "otlp"],
         default=None,
@@ -139,6 +150,7 @@ def main() -> int:
                 policy_config=policy_config,
                 approval_timeout=args.approval_timeout,
                 audit_log=audit_log,
+                idempotent_replay=args.idempotent_replay,
             ).run()
         )
     finally:

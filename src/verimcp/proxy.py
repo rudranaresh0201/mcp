@@ -12,6 +12,7 @@ resources/read this proxy has a verifier for, verify() decides what actually
 gets forwarded back to the Host.
 """
 import asyncio
+import copy
 import itertools
 import sys
 import time
@@ -19,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from verimcp import audit_resource, jsonrpc, telemetry
+from verimcp import audit_resource, idempotency, jsonrpc, telemetry
 from verimcp.audit import AuditStore
 from verimcp.gates.base import RequestGate
 from verimcp.gates.sampling_rate_limit import SamplingRateLimitGate
@@ -75,6 +76,7 @@ class Proxy:
         policy_config: Path | None = None,
         approval_timeout: float = 60.0,
         audit_log: Path | None = None,
+        idempotent_replay: bool = False,
     ):
         self.backend_cmd = backend_cmd
         # None loads every verifier installed under the verimcp.verifiers
@@ -165,6 +167,11 @@ class Proxy:
         # docstring for why that's safe) -- whether anything actually gets
         # exported depends only on whether cli.py's configure_sdk ran.
         self._active_spans: dict = {}
+        # Verify-before-retry (arxiv 2608.02645), opt-in via --idempotent-replay
+        # same as every other capability added after Phase 0. None means every
+        # retry is forwarded and re-executed by the backend, unchanged existing
+        # behavior. See idempotency.py's module docstring for the adaptation.
+        self._idempotency = idempotency.IdempotencyCache() if idempotent_replay else None
 
     async def run(self) -> None:
         backend = await asyncio.create_subprocess_exec(
@@ -267,6 +274,32 @@ class Proxy:
                     jsonrpc.write_message_sync(denial)
                     continue
 
+            if self._idempotency is not None and message.get("method") == "tools/call" and "id" in message:
+                params = message.get("params", {})
+                key = idempotency.compute_key(params.get("name", ""), params.get("arguments"))
+                cached = self._idempotency.lookup(key)
+                if cached is not None:
+                    # A retry of a call already independently verified true
+                    # this session -- the whole point of verify-before-retry:
+                    # answer from the last confirmed outcome instead of
+                    # re-running the backend and risking a duplicate side
+                    # effect (a second git commit, a second CI run, ...).
+                    # Finishes the span/records the audit entry the same way
+                    # the gate-denial branch above does, then never reaches
+                    # self._pending or the backend at all.
+                    replayed = copy.deepcopy(cached)
+                    replayed["id"] = message["id"]
+                    self._record_audit(
+                        message,
+                        outcome="idempotent_replay",
+                        verification={
+                            "idempotent_replay": True,
+                            "reason": "identical tool call already verified this session",
+                        },
+                    )
+                    jsonrpc.write_message_sync(replayed)
+                    continue
+
             if message.get("method") in ("tools/call", "resources/read") and "id" in message:
                 self._pending[message["id"]] = message
 
@@ -332,6 +365,23 @@ class Proxy:
                 for verifier in verifiers_run:
                     message = verifier.verify(request, message, root=self._root)
                 self._record_completed_audit(request, message, verifiers_run)
+
+                if (
+                    self._idempotency is not None
+                    and request.get("method") == "tools/call"
+                    and verifiers_run
+                    and "error" not in message
+                    and not message.get("result", {}).get("isError")
+                ):
+                    # Only cache a call verimcp actually independently
+                    # confirmed (verifiers_run non-empty and it passed) --
+                    # no verifier means no postcondition to trust, so a
+                    # retry of an unverifiable tool is always forwarded and
+                    # re-executed, same as today. This mirrors the paper's
+                    # own caveat: postconditions encode domain knowledge that
+                    # can't be inferred from an API call alone.
+                    key = idempotency.compute_key(params.get("name", ""), params.get("arguments"))
+                    self._idempotency.record_verified_ok(key, message)
 
             jsonrpc.write_message_sync(message)
 

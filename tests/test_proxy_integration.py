@@ -101,6 +101,89 @@ async def test_git_commit_verified_over_real_pipe(tmp_path: Path):
         await proc.wait()
 
 
+def _counter_step(counter_path: Path) -> dict:
+    # Appends one byte to a real file every time it actually runs -- a shell
+    # step with no built-in idempotency of its own (unlike `git commit`,
+    # which safely no-ops on a truly-unchanged retry, making it a bad choice
+    # for this test), so a second real execution is unambiguous evidence of
+    # a duplicate side effect. Not marked idempotent: true -- that flag
+    # controls CIRunVerifier's own re-execution-to-verify pass, a separate
+    # concern from this test, and marking it would make the verifier itself
+    # append a byte too.
+    return {
+        "name": "bump-counter",
+        "cmd": f'{sys.executable} -c "open(r\'{counter_path}\', \'a\').write(chr(120))"',
+    }
+
+
+async def test_idempotent_replay_prevents_duplicate_execution(tmp_path: Path):
+    """The core verify-before-retry claim (arxiv 2608.02645 adaptation): once
+    verimcp has independently verified a run_ci_pipeline call's claims are
+    self-consistent, a byte-identical retry (e.g. a Host resending after a
+    timeout it misread as failure) must be answered from that confirmed
+    result, not re-executed -- proven the strong way, by checking the
+    counter file the backend actually touches, not just that the second
+    response looks like a success."""
+    counter = tmp_path / "counter.txt"
+    proc = await _spawn_verimcp(tmp_path, ["--idempotent-replay"])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        ci_params = {"name": "run_ci_pipeline", "arguments": {"steps": [_counter_step(counter)]}}
+        await _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": ci_params})
+        first = await _recv(proc)
+        assert first["result"]["isError"] is False
+        assert counter.read_text() == "x"  # backend really ran the step once
+
+        # Retry: same tool, same arguments, new request id -- exactly what a
+        # client resending after an ambiguous response looks like over the wire.
+        await _send(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": ci_params})
+        second = await _recv(proc)
+
+        assert second["id"] == 3
+        assert second["result"]["isError"] is False
+        assert counter.read_text() == "x"  # NOT "xx" -- the retry never reached the backend
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_without_idempotent_replay_retry_executes_twice(tmp_path: Path):
+    """Baseline/control for the test above: with the flag omitted (existing,
+    unchanged behavior), the identical retry IS re-forwarded and DOES run the
+    step again -- the actual duplicate-action problem verify-before-retry
+    exists to prevent, proven to really occur without it."""
+    counter = tmp_path / "counter.txt"
+    proc = await _spawn_verimcp(tmp_path)  # no --idempotent-replay
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        ci_params = {"name": "run_ci_pipeline", "arguments": {"steps": [_counter_step(counter)]}}
+        await _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": ci_params})
+        first = await _recv(proc)
+        assert first["result"]["isError"] is False
+        assert counter.read_text() == "x"
+
+        await _send(proc, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": ci_params})
+        second = await _recv(proc)
+        assert second["result"]["isError"] is False
+
+        assert counter.read_text() == "xx"  # a real second execution
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
 async def test_ci_run_verified_over_real_pipe(tmp_path: Path):
     """CIRunVerifier re-executes idempotent steps by shelling out itself --
     same subprocess-over-stdio deadlock risk as GitCommitVerifier above, so
