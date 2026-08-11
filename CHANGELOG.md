@@ -3,7 +3,34 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions apply to both `verimcp` and `devmcp`, which are versioned in
 lockstep since they've evolved together, despite having no import
-dependency on each other.
+dependency on each other -- except when a release only changes one of the
+two (like 0.2.2 below), in which case only that package's version moves.
+
+## [0.2.2] — verimcp only, `devmcp` unchanged at 0.2.1
+
+### Added
+
+- **Verify-before-retry** (`--idempotent-replay`), adapted from arXiv
+  2608.02645 ("Verified Tool Calls Improve LLM Agent Reliability Under
+  Non-Atomic Failures"). If a `tools/call` is a byte-identical retry of a
+  call already independently verified true earlier in the session,
+  verimcp answers from that confirmed result instead of forwarding to the
+  backend again -- stops a client that retries after an ambiguous
+  response (timeout, dropped connection) from duplicating a side effect
+  (a second commit, a second charge). Only applies to tools with a
+  verifier configured; the key is derived from `(tool name, arguments)`,
+  not a caller-supplied idempotency key, and safety comes from the prior
+  call's postcondition having been independently verified, not from key
+  matching alone (`src/verimcp/idempotency.py`).
+- `scripts/benchmark_claim_acceptance.py` and
+  `scripts/benchmark_retry_duplication.py` -- real, runnable benchmarks
+  (subprocess pipes, no mocks) proving both of the README's core claims
+  with numbers: a raw Host accepts 100% of fabricated results (12/12);
+  verimcp catches 75% (9/12), with the 3 principled misses named in the
+  script's own output. A raw Host duplicates 5/5 non-idempotent side
+  effects on retry; `--idempotent-replay` duplicates 0/5.
+- `Dockerfile` for containerized use.
+- `glama.json` for Glama server ownership/metadata verification.
 
 ## [0.2.1]
 

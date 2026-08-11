@@ -1,6 +1,6 @@
 [project]
 name = "verimcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "A standalone MCP server that proxies real MCP backends and verifies tool-call postconditions before results reach the client"
 readme = "README.md"
 license = {file = "LICENSE"}
