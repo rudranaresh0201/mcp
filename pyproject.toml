@@ -43,6 +43,7 @@ ci_run = "verimcp.verifiers.ci_run:CIRunVerifier"
 resource_read = "verimcp.verifiers.resource_read:ResourceReadVerifier"
 git_server_commit = "verimcp.verifiers.git_server_commit:GitServerCommitVerifier"
 sqlite = "verimcp.verifiers.sqlite:SQLiteVerifier"
+docker = "verimcp.verifiers.docker:DockerVerifier"
 
 [project.optional-dependencies]
 # Real span/metric export -- Console for local debugging, OTLP for pointing

@@ -1,4 +1,6 @@
 from devmcp.tools.base import Tool
+from devmcp.tools.docker_build_image import DockerBuildImageTool
+from devmcp.tools.docker_run_container import DockerRunContainerTool
 from devmcp.tools.git_branch import GitBranchTool
 from devmcp.tools.git_commit import GitCommitTool
 from devmcp.tools.run_ci_pipeline import RunCiPipelineTool
@@ -15,6 +17,8 @@ ALL_TOOLS: list[Tool] = [
     SummarizeDiffTool(),
     SqliteCreateTableTool(),
     SqliteInsertRowTool(),
+    DockerBuildImageTool(),
+    DockerRunContainerTool(),
 ]
 
 TOOLS_BY_NAME: dict[str, Tool] = {t.name: t for t in ALL_TOOLS}

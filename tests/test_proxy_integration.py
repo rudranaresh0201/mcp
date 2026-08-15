@@ -3,8 +3,11 @@ driven over real stdio -- the same shape devmcp/tests/test_server_integration.py
 uses, one layer deeper. No mocks anywhere in this chain."""
 import asyncio
 import json
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 async def _send(proc, message: dict) -> None:
@@ -840,6 +843,68 @@ async def test_schema_conformance_runs_over_real_pipe_using_devmcps_own_declared
     finally:
         proc.terminate()
         await proc.wait()
+
+
+async def test_docker_tools_verified_over_real_pipe(tmp_path: Path):
+    """Docker domain, same shape as the sqlite/write_file/git_commit pipe
+    tests: real subprocess pair, a real image built and a real container
+    run through it, DockerVerifier independently re-inspecting both via
+    `docker inspect` rather than trusting devmcp's own report."""
+    if subprocess.run(["docker", "info"], capture_output=True, check=False).returncode != 0:
+        pytest.skip("docker daemon not available")
+
+    (tmp_path / "Dockerfile").write_text('FROM busybox\nCMD ["sh", "-c", "exit 5"]\n')
+    tag = "verimcp-proxy-integration-test"
+    audit_path = tmp_path / "audit.jsonl"
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--audit-log", str(audit_path)])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "docker_build_image",
+                "arguments": {"dockerfile_path": "Dockerfile", "context_path": ".", "tag": tag},
+            },
+        })
+        build_response = await _recv(proc)
+        assert build_response["result"]["isError"] is False
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "docker_run_container", "arguments": {"image": tag}},
+        })
+        run_response = await _recv(proc)
+        assert run_response["result"]["structuredContent"]["exit_code"] == 5
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 4, "method": "resources/read",
+            "params": {"uri": "verimcp://audit/current"},
+        })
+        read_response = await _recv(proc)
+        lines = [json.loads(line) for line in read_response["result"]["contents"][0]["text"].splitlines() if line.strip()]
+        by_target = {line["target"]: line for line in lines}
+        assert by_target["docker_build_image"]["outcome"] == "verified_ok"
+        assert "DockerVerifier" in by_target["docker_build_image"]["verification"]["verifiers"]
+        # docker_run_container reports isError:true for any nonzero exit
+        # code by design (same convention run_ci_pipeline uses for a failed
+        # step) -- audit's outcome/passed fields reflect *that*, not
+        # whether verification itself failed. What proves the claim was
+        # independently confirmed real is DockerVerifier still being listed
+        # with no [verimcp] override text -- if it had caught a lie, the
+        # content text below would say so.
+        run_entry = by_target["docker_run_container"]
+        assert run_entry["outcome"] == "verified_failed"
+        assert "DockerVerifier" in run_entry["verification"]["verifiers"]
+    finally:
+        proc.terminate()
+        await proc.wait()
+        subprocess.run(["docker", "rmi", "-f", tag], capture_output=True, check=False)
 
 
 async def test_sqlite_tools_verified_over_real_pipe(tmp_path: Path):

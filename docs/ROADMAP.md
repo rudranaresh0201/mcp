@@ -34,11 +34,11 @@ below.
   (adversarial test corpus), Phase 7 (verifier SDK), and Phase 8 (packaging)
   are also done -- see their sections below.
 
-Phases 0-8 were done as of 2026-08-05. Phase 9 (SQLite domain, see below)
-followed as devmcp's next real domain expansion, added 2026-08-15. There is
-no "next phase" queued beyond it right now -- Docker/Postgres/Kubernetes
-remain queued per ADR 0002, unblocked, waiting only on Docker Desktop being
-available in this environment.
+Phases 0-8 were done as of 2026-08-05. Phase 9 (SQLite domain) and Phase 10
+(Docker domain, the one ADR 0002 originally named) both followed as devmcp's
+next real domain expansions, added 2026-08-15 -- Docker Desktop/WSL2 got
+installed the same day, resolving the setup gap ADR 0007 recorded. Postgres
+and Kubernetes remain queued per ADR 0002, genuinely unblocked now.
 
 ## Phase 0 — Foundation (make what already exists actually run)
 
@@ -360,6 +360,54 @@ natural low-cost follow-ups, not silently dropped.
 **Free/leverage:** `sqlite3` is Python stdlib -- zero install, zero daemon,
 same "free and local" bar every prior domain met, just without needing
 Docker Desktop first.
+
+## Phase 10 — Docker domain ✅ done
+
+*(ADR 0002's originally-named next domain, delayed by ADR 0007 for a local
+setup gap, now built once Docker Desktop/WSL2 were actually installed --
+see [ADR 0009](adr/0009-docker-domain.md))*
+
+Goal: the domain ADR 0002 named from the start -- real container/image
+state as ground truth, `docker inspect` giving an independently-checkable
+answer with no third-party API involved.
+
+- ✅ Two new devmcp tools, `docker_build_image` and `docker_run_container`
+  (`devmcp/src/devmcp/tools/`, backed by `devmcp/src/devmcp/docker_ops.py`)
+  -- real `docker build`/`docker run`/`docker wait` subprocess calls, no
+  mocking. Both run through `asyncio.to_thread`, same reasoning
+  `run_ci_pipeline.py` already states for a potentially-slow subprocess
+  call blocking devmcp's single dispatch loop.
+- ✅ `DockerVerifier` (`src/verimcp/verifiers/docker.py`, registered under
+  `verimcp.verifiers`) -- independently re-runs `docker inspect` on the
+  claimed image tag or container id, and for a run claim, compares the
+  claimed exit code against the container's real `.State.ExitCode` --
+  not just existence, the specific fact, same discipline
+  `FilesystemVerifier`'s content-hash-compare already established.
+- ✅ Both tools also declare a real `outputSchema` (Phase 9's schema layer),
+  so `SchemaConformanceVerifier` covers this brand-new domain immediately
+  with zero extra work -- real proof that layer generalizes.
+- ✅ A real environment finding along the way, not a code bug: `docker run`
+  on an image not yet in the local store hit a genuine TLS negotiation
+  error pulling from Docker Hub on this machine, while `docker build`'s
+  buildx pull path of the same base image succeeded -- reproduced with the
+  bare CLI outside any project code to rule this project out as the cause.
+  Every test builds a local image first, then runs that local tag, which
+  needs no registry access at all -- see ADR 0009 for the full account.
+- ✅ Proven at every layer already established for prior domains: devmcp
+  unit tests independently re-inspecting real images/containers
+  (`devmcp/tests/test_tools_unit.py`), verifier unit tests catching a
+  fabricated tag/container-id/exit-code
+  (`tests/test_docker_verifier.py`), and a real stdio proxy pipe
+  end-to-end test asserting both `DockerVerifier` and
+  `SchemaConformanceVerifier` ran
+  (`tests/test_proxy_integration.py::test_docker_tools_verified_over_real_pipe`).
+
+**Not in this pass, explicitly deferred**: adversarial corpus and MCP
+Inspector smoke test extensions for this domain -- same stated-not-hidden
+pattern Phases 9 and the schema layer both already used.
+
+**Free/leverage:** Docker Desktop is free for personal use; the `docker`
+CLI subprocess calls needed no new Python dependency at all.
 
 ## Sequencing note
 

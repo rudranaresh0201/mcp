@@ -4,12 +4,19 @@ import subprocess
 
 import pytest
 from devmcp.context import ServerContext
+from devmcp.tools.docker_build_image import DockerBuildImageTool
+from devmcp.tools.docker_run_container import DockerRunContainerTool
 from devmcp.tools.git_branch import GitBranchTool
 from devmcp.tools.git_commit import GitCommitTool
 from devmcp.tools.run_ci_pipeline import RunCiPipelineTool
 from devmcp.tools.sqlite_create_table import SqliteCreateTableTool
 from devmcp.tools.sqlite_insert_row import SqliteInsertRowTool
 from devmcp.tools.write_file import WriteFileTool
+
+pytestmark_docker = pytest.mark.skipif(
+    subprocess.run(["docker", "info"], capture_output=True, check=False).returncode != 0,
+    reason="docker daemon not available",
+)
 
 
 async def test_write_file_tool_writes_real_file(tmp_git_repo):
@@ -148,3 +155,56 @@ async def test_sqlite_create_table_tool_rejects_unsafe_table_name(tmp_git_repo, 
     )
 
     assert result["isError"] is True
+
+
+@pytestmark_docker
+async def test_docker_build_image_tool_builds_real_image(tmp_git_repo):
+    (tmp_git_repo / "Dockerfile").write_text('FROM busybox\nCMD ["echo", "hi"]\n')
+    ctx = ServerContext(repo_root=tmp_git_repo, connection=None)
+    tag = "devmcp-test-build-image"
+
+    try:
+        result = await DockerBuildImageTool().call(
+            {"dockerfile_path": "Dockerfile", "context_path": ".", "tag": tag}, ctx
+        )
+
+        assert result["isError"] is False
+        inspected = subprocess.run(["docker", "image", "inspect", tag], capture_output=True, check=False)
+        assert inspected.returncode == 0
+    finally:
+        subprocess.run(["docker", "rmi", "-f", tag], capture_output=True, check=False)
+
+
+@pytestmark_docker
+async def test_docker_run_container_tool_reports_real_exit_code(tmp_git_repo):
+    # Runs an already-built local tag rather than a bare "busybox" reference:
+    # `docker run` on an image not yet in the local store falls back to a
+    # registry pull, which hits a real, reproducible TLS negotiation error
+    # talking to Docker Hub on this machine ("tls: protocol version not
+    # supported") -- a genuine environment issue distinct from the buildx
+    # pull path `docker build` uses successfully. Building first sidesteps
+    # it entirely: `docker run` on a local-only tag needs no network at all.
+    (tmp_git_repo / "Dockerfile").write_text('FROM busybox\nCMD ["sh", "-c", "exit 7"]\n')
+    ctx = ServerContext(repo_root=tmp_git_repo, connection=None)
+    tag = "devmcp-test-run-container"
+    build_result = await DockerBuildImageTool().call(
+        {"dockerfile_path": "Dockerfile", "context_path": ".", "tag": tag}, ctx
+    )
+    assert build_result["isError"] is False
+
+    try:
+        result = await DockerRunContainerTool().call({"image": tag}, ctx)
+
+        assert result["isError"] is True  # nonzero exit code
+        container_id = result["structuredContent"]["container_id"]
+        assert result["structuredContent"]["exit_code"] == 7
+        try:
+            inspected = subprocess.run(
+                ["docker", "container", "inspect", "--format", "{{.State.ExitCode}}", container_id],
+                capture_output=True, text=True, check=False,
+            )
+            assert inspected.stdout.strip() == "7"
+        finally:
+            subprocess.run(["docker", "rm", "-f", container_id], capture_output=True, check=False)
+    finally:
+        subprocess.run(["docker", "rmi", "-f", tag], capture_output=True, check=False)
