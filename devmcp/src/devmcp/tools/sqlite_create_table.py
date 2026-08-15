@@ -17,6 +17,15 @@ class SqliteCreateTableTool(Tool):
         },
         "required": ["db_path", "table", "columns"],
     }
+    output_schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "db_path": {"type": "string"},
+            "table": {"type": "string"},
+            "columns": {"type": "object"},
+        },
+        "required": ["db_path", "table", "columns"],
+    }
 
     async def call(self, arguments: dict[str, Any], ctx: ServerContext) -> dict[str, Any]:
         db_path = arguments["db_path"]

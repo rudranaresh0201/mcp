@@ -22,6 +22,10 @@ dependencies = [
     # below, wired up lazily so a plain `pip install verimcp` never pulls in
     # exporter dependencies it might not use.
     "opentelemetry-api>=1.27",
+    # SchemaConformanceVerifier: validates structuredContent against a
+    # tool's own declared outputSchema (JSON Schema 2020-12, per the MCP
+    # spec). Not optional -- this verifier is always appended, not opt-in.
+    "jsonschema>=4.20",
 ]
 
 [project.urls]

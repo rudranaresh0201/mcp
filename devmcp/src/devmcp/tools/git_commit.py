@@ -16,6 +16,15 @@ class GitCommitTool(Tool):
         },
         "required": ["message", "files"],
     }
+    output_schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "commit_hash": {"type": "string"},
+            "message": {"type": "string"},
+            "files": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["commit_hash", "message", "files"],
+    }
 
     async def call(self, arguments: dict[str, Any], ctx: ServerContext) -> dict[str, Any]:
         message = arguments["message"]

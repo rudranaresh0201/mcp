@@ -18,6 +18,15 @@ class SqliteInsertRowTool(Tool):
         },
         "required": ["db_path", "table", "values"],
     }
+    output_schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "db_path": {"type": "string"},
+            "table": {"type": "string"},
+            "values": {"type": "object"},
+        },
+        "required": ["db_path", "table", "values"],
+    }
 
     async def call(self, arguments: dict[str, Any], ctx: ServerContext) -> dict[str, Any]:
         db_path = arguments["db_path"]

@@ -27,6 +27,29 @@ class RunCiPipelineTool(Tool):
         },
         "required": ["steps"],
     }
+    output_schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "cmd": {"type": "string"},
+                        "idempotent": {"type": "boolean"},
+                        "exit_code": {"type": "integer"},
+                        "passed": {"type": "boolean"},
+                        "stdout_tail": {"type": "string"},
+                        "stderr_tail": {"type": "string"},
+                    },
+                    "required": ["name", "cmd", "exit_code", "passed"],
+                },
+            },
+            "passed": {"type": "boolean"},
+        },
+        "required": ["steps", "passed"],
+    }
 
     async def call(self, arguments: dict[str, Any], ctx: ServerContext) -> dict[str, Any]:
         results = []

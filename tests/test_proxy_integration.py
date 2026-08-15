@@ -783,6 +783,65 @@ async def test_resource_list_id_collision_with_backends_own_roots_list_id(tmp_pa
         await proc.wait()
 
 
+async def test_schema_conformance_runs_over_real_pipe_using_devmcps_own_declared_schema(tmp_path: Path):
+    """Proves the generic layer works for real, not just against a schema
+    handed in by hand in the unit tests: a real tools/list teaches verimcp
+    devmcp's own genuinely declared outputSchema for git_commit, then a real
+    git_commit call is checked against it -- running *alongside*
+    GitCommitVerifier (which checks a different thing: that the claimed
+    hash really exists in the repo), not instead of it. Both verifiers
+    independently pass, and the audit entry names both."""
+    audit_path = tmp_path / "audit.jsonl"
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--audit-log", str(audit_path)])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        # tools/list first -- this is what teaches verimcp devmcp's real
+        # declared outputSchemas, exactly like a real Host would call it
+        # before ever calling a tool.
+        await _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        listing = await _recv(proc)
+        git_commit_def = next(t for t in listing["result"]["tools"] if t["name"] == "git_commit")
+        assert "outputSchema" in git_commit_def
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "write_file", "arguments": {"path": "a.txt", "content": "hello"}},
+        })
+        await _recv(proc)
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "git_commit", "arguments": {"message": "add a.txt", "files": ["a.txt"]}},
+        })
+        response = await _recv(proc)
+        assert response["result"]["isError"] is False
+        assert response["result"]["structuredContent"]["commit_hash"]
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 5, "method": "resources/read",
+            "params": {"uri": "verimcp://audit/current"},
+        })
+        read_response = await _recv(proc)
+        lines = [json.loads(line) for line in read_response["result"]["contents"][0]["text"].splitlines() if line.strip()]
+        commit_entry = next(line for line in lines if line["target"] == "git_commit")
+        # <= not ==: GitServerCommitVerifier also applies_to("git_commit")
+        # (it shares a name with devmcp's own tool, see ADR/ROADMAP Phase 1)
+        # and loading every installed verifier is the default here -- the
+        # point of this assertion is that both the domain check and the
+        # generic schema check ran and passed, not that nothing else did.
+        assert {"GitCommitVerifier", "SchemaConformanceVerifier"} <= set(commit_entry["verification"]["verifiers"])
+        assert commit_entry["verification"]["passed"] is True
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
 async def test_sqlite_tools_verified_over_real_pipe(tmp_path: Path):
     """SQLite domain, same shape as the write_file/git_commit pipe tests:
     real subprocess pair, real .db file, SQLiteVerifier independently

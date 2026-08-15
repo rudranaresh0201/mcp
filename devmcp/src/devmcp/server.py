@@ -14,6 +14,14 @@ from devmcp.resources import LISTED_RESOURCES
 from devmcp.resources import resolve as resolve_resource
 from devmcp.roots import RootsClient
 from devmcp.tools import ALL_TOOLS, TOOLS_BY_NAME
+from devmcp.tools.base import Tool
+
+
+def _tool_definition(t: Tool) -> dict[str, Any]:
+    definition = {"name": t.name, "description": t.description, "inputSchema": t.input_schema}
+    if t.output_schema is not None:
+        definition["outputSchema"] = t.output_schema
+    return definition
 
 
 class Server:
@@ -55,12 +63,7 @@ class Server:
         elif method == "tools/list":
             await self.connection.send_response(
                 id_,
-                result={
-                    "tools": [
-                        {"name": t.name, "description": t.description, "inputSchema": t.input_schema}
-                        for t in ALL_TOOLS
-                    ]
-                },
+                result={"tools": [_tool_definition(t) for t in ALL_TOOLS]},
             )
         elif method == "tools/call":
             # Fire-and-forget, same reason as _negotiate_roots below: a tool

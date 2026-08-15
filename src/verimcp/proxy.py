@@ -26,6 +26,7 @@ from verimcp.gates.base import RequestGate
 from verimcp.gates.sampling_rate_limit import SamplingRateLimitGate
 from verimcp.gates.tool_call_policy import ToolCallPolicyGate
 from verimcp.verifiers import registry
+from verimcp.verifiers.schema_conformance import SchemaConformanceVerifier
 
 FILE_URI_PREFIX = "file://"
 # Reserved id namespace for requests *verimcp itself* originates (currently
@@ -85,6 +86,15 @@ class Proxy:
         # one backend is in play, since two backends can expose a same-named
         # tool with differently-shaped responses.
         self._verifiers = registry.load_verifiers(verifier_names)
+        # Generic, zero-setup baseline (ADR 0008): checks structuredContent
+        # against whatever outputSchema a tool declared for itself in
+        # tools/list, on any backend, with no per-tool verifier needed.
+        # Always appended regardless of --verifiers selection -- unlike a
+        # domain verifier, it can never misfire against the wrong backend's
+        # same-named tool, since it only ever checks a tool against the
+        # exact schema *that same tool* declared in *this* session.
+        self._tool_output_schemas: dict[str, dict] = {}
+        self._verifiers.append(SchemaConformanceVerifier(self._tool_output_schemas))
         # Pending requests we've forwarded to the backend, keyed by JSON-RPC id,
         # so that when the matching response comes back we still have the
         # original request (tool name + arguments, or resource uri) to verify
@@ -152,6 +162,7 @@ class Proxy:
         # extended (the audit resource entries) in _forward_backend_to_host.
         self._pending_initialize: set = set()
         self._pending_resource_list: set = set()
+        self._pending_tools_list: set = set()
         # gate/approval info for a require_approval call that was accepted,
         # keyed by request id -- kept out of the request dict itself (which
         # is the exact object forwarded to the backend over the wire) so it
@@ -214,6 +225,13 @@ class Proxy:
 
             if message.get("method") == "resources/list" and "id" in message and self._audit is not None:
                 self._pending_resource_list.add(message["id"])
+
+            if message.get("method") == "tools/list" and "id" in message:
+                # Unconditional, unlike _pending_resource_list -- schema
+                # conformance isn't opt-in behind --audit-log, it should
+                # capture whatever outputSchemas the backend declares on
+                # every tools/list, always.
+                self._pending_tools_list.add(message["id"])
 
             if (
                 self._audit is not None
@@ -349,6 +367,16 @@ class Proxy:
             if "method" not in message and message.get("id") in self._pending_resource_list:
                 self._pending_resource_list.discard(message["id"])
                 message = self._inject_audit_resources(message)
+
+            if "method" not in message and message.get("id") in self._pending_tools_list:
+                # Observed, not modified -- same technique _extract_root uses
+                # on roots/list replies: watch the response as it passes
+                # through unchanged, don't intercept it.
+                self._pending_tools_list.discard(message["id"])
+                for tool in message.get("result", {}).get("tools", []):
+                    output_schema = tool.get("outputSchema")
+                    if output_schema is not None:
+                        self._tool_output_schemas[tool["name"]] = output_schema
 
             if message.get("method") is not None and "id" in message:
                 denial = self._check_gates(message)

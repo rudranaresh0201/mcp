@@ -16,6 +16,14 @@ class GitBranchTool(Tool):
         },
         "required": ["name"],
     }
+    output_schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "branch": {"type": "string"},
+            "commit_hash": {"type": "string"},
+        },
+        "required": ["branch", "commit_hash"],
+    }
 
     async def call(self, arguments: dict[str, Any], ctx: ServerContext) -> dict[str, Any]:
         name = arguments["name"]
