@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import subprocess
 
 import pytest
@@ -6,6 +7,8 @@ from devmcp.context import ServerContext
 from devmcp.tools.git_branch import GitBranchTool
 from devmcp.tools.git_commit import GitCommitTool
 from devmcp.tools.run_ci_pipeline import RunCiPipelineTool
+from devmcp.tools.sqlite_create_table import SqliteCreateTableTool
+from devmcp.tools.sqlite_insert_row import SqliteInsertRowTool
 from devmcp.tools.write_file import WriteFileTool
 
 
@@ -80,3 +83,68 @@ async def test_run_ci_pipeline_reports_real_exit_codes(tmp_git_repo):
     assert reported[0]["passed"] is True
     assert reported[1]["passed"] is False
     assert reported[1]["exit_code"] == 1
+
+
+async def test_sqlite_create_table_tool_creates_real_table(tmp_git_repo):
+    ctx = ServerContext(repo_root=tmp_git_repo, connection=None)
+
+    result = await SqliteCreateTableTool().call(
+        {"db_path": "app.db", "table": "users", "columns": {"id": "INTEGER PRIMARY KEY", "name": "TEXT"}}, ctx
+    )
+
+    assert result["isError"] is False
+    conn = sqlite3.connect(tmp_git_repo / "app.db")
+    try:
+        row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'").fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+
+
+async def test_sqlite_insert_row_tool_inserts_real_row(tmp_git_repo):
+    ctx = ServerContext(repo_root=tmp_git_repo, connection=None)
+    await SqliteCreateTableTool().call(
+        {"db_path": "app.db", "table": "users", "columns": {"id": "INTEGER PRIMARY KEY", "name": "TEXT"}}, ctx
+    )
+
+    result = await SqliteInsertRowTool().call(
+        {"db_path": "app.db", "table": "users", "values": {"id": 1, "name": "rudra"}}, ctx
+    )
+
+    assert result["isError"] is False
+    conn = sqlite3.connect(tmp_git_repo / "app.db")
+    try:
+        row = conn.execute("SELECT name FROM users WHERE id=1").fetchone()
+    finally:
+        conn.close()
+    assert row == ("rudra",)
+
+
+@pytest.mark.parametrize("escaping_path", [
+    "C:/Windows/System32/evil.db",
+    "/etc/evil.db",
+    "../../outside.db",
+])
+async def test_sqlite_create_table_tool_rejects_paths_outside_repo_root(tmp_git_repo, escaping_path):
+    ctx = ServerContext(repo_root=tmp_git_repo, connection=None)
+
+    result = await SqliteCreateTableTool().call(
+        {"db_path": escaping_path, "table": "users", "columns": {"id": "INTEGER"}}, ctx
+    )
+
+    assert result["isError"] is True
+
+
+@pytest.mark.parametrize("bad_identifier", [
+    "users; DROP TABLE x",
+    "users--",
+    "1users",
+])
+async def test_sqlite_create_table_tool_rejects_unsafe_table_name(tmp_git_repo, bad_identifier):
+    ctx = ServerContext(repo_root=tmp_git_repo, connection=None)
+
+    result = await SqliteCreateTableTool().call(
+        {"db_path": "app.db", "table": bad_identifier, "columns": {"id": "INTEGER"}}, ctx
+    )
+
+    assert result["isError"] is True

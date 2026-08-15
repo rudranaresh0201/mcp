@@ -781,3 +781,55 @@ async def test_resource_list_id_collision_with_backends_own_roots_list_id(tmp_pa
     finally:
         proc.terminate()
         await proc.wait()
+
+
+async def test_sqlite_tools_verified_over_real_pipe(tmp_path: Path):
+    """SQLite domain, same shape as the write_file/git_commit pipe tests:
+    real subprocess pair, real .db file, SQLiteVerifier independently
+    reconnecting to confirm the table/row genuinely exist -- and the audit
+    trail records verified_ok for both, same as ADR/ROADMAP's existing
+    domains."""
+    audit_path = tmp_path / "audit.jsonl"
+    proc = await _spawn_verimcp(tmp_path, verimcp_args=["--audit-log", str(audit_path)])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {
+                "name": "sqlite_create_table",
+                "arguments": {"db_path": "app.db", "table": "users", "columns": {"id": "INTEGER PRIMARY KEY", "name": "TEXT"}},
+            },
+        })
+        create_response = await _recv(proc)
+        assert create_response["result"]["isError"] is False
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {
+                "name": "sqlite_insert_row",
+                "arguments": {"db_path": "app.db", "table": "users", "values": {"id": 1, "name": "rudra"}},
+            },
+        })
+        insert_response = await _recv(proc)
+        assert insert_response["result"]["isError"] is False
+
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": 4, "method": "resources/read",
+            "params": {"uri": "verimcp://audit/current"},
+        })
+        read_response = await _recv(proc)
+        lines = [json.loads(line) for line in read_response["result"]["contents"][0]["text"].splitlines() if line.strip()]
+        by_target = {line["target"]: line for line in lines}
+        assert by_target["sqlite_create_table"]["outcome"] == "verified_ok"
+        assert by_target["sqlite_create_table"]["verification"]["verifiers"] == ["SQLiteVerifier"]
+        assert by_target["sqlite_insert_row"]["outcome"] == "verified_ok"
+        assert by_target["sqlite_insert_row"]["verification"]["verifiers"] == ["SQLiteVerifier"]
+    finally:
+        proc.terminate()
+        await proc.wait()

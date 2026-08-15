@@ -34,8 +34,11 @@ below.
   (adversarial test corpus), Phase 7 (verifier SDK), and Phase 8 (packaging)
   are also done -- see their sections below.
 
-Every phase in this roadmap is now done. There is no "next phase" queued as
-of 2026-08-05.
+Phases 0-8 were done as of 2026-08-05. Phase 9 (SQLite domain, see below)
+followed as devmcp's next real domain expansion, added 2026-08-15. There is
+no "next phase" queued beyond it right now -- Docker/Postgres/Kubernetes
+remain queued per ADR 0002, unblocked, waiting only on Docker Desktop being
+available in this environment.
 
 ## Phase 0 — Foundation (make what already exists actually run)
 
@@ -313,6 +316,50 @@ not new code.
 
 **Free/leverage:** PyPI hosting is free, GitHub Pages/GitHub-native docs
 are free, `setuptools` build backend is already in place.
+
+## Phase 9 — SQLite domain ✅ done
+
+*(covers ADR 0002's domain-expansion commitment, reordered ahead of Docker
+by availability -- see [ADR 0007](adr/0007-sqlite-as-next-domain.md))*
+
+Goal: devmcp's next real domain beyond git/CI/filesystem, paired with a real
+verimcp verifier, chosen for zero setup cost since Docker Desktop isn't
+installed on this machine.
+
+- ✅ Two new devmcp tools, `sqlite_create_table` and `sqlite_insert_row`
+  (`devmcp/src/devmcp/tools/`), backed by `devmcp/src/devmcp/sqlite_ops.py`
+  -- real stdlib `sqlite3` calls against a `.db` file under the negotiated
+  repo root, no mocking. The path-safety check `write_file` already had
+  (Windows/POSIX absolute paths, `../` traversal) was extracted into
+  `git_ops.resolve_safe_path` so both tools share it rather than
+  duplicating a security boundary.
+- ✅ `SQLiteVerifier` (`src/verimcp/verifiers/sqlite.py`, registered under
+  the `verimcp.verifiers` entry-point group) -- reconnects to the same
+  `.db` file with a fresh connection, independent of the tool's own, and
+  re-queries `sqlite_master` (table claims) or the claimed row's exact
+  values (row claims). Same "independently re-derive the claim" principle
+  as `FilesystemVerifier`/`GitCommitVerifier`, applied to relational state.
+- ✅ A new risk class this domain introduces -- SQL identifier injection,
+  since table/column names can't be parameterized the way values can --
+  is guarded independently on both sides (devmcp's `sqlite_ops.py` and
+  verimcp's verifier each validate identifiers against the same allowlist
+  before building any query), so the verifier's own ground-truth check
+  can't become a second injection point. Full reasoning in ADR 0007.
+- ✅ Proven at every layer already established for prior domains: devmcp
+  unit tests reopening the `.db` file independently
+  (`devmcp/tests/test_tools_unit.py`), verifier unit tests catching a
+  fabricated table/row claim (`tests/test_sqlite_verifier.py`), and a real
+  stdio proxy pipe end-to-end test asserting `verified_ok` in the audit log
+  (`tests/test_proxy_integration.py::test_sqlite_tools_verified_over_real_pipe`).
+
+**Not in this pass, explicitly deferred**: extending the adversarial corpus
+(`tests/fixtures/lying_server.py`/`tests/test_adversarial_corpus.py`,
+currently "6/6") and the MCP Inspector smoke test with a SQLite case --
+natural low-cost follow-ups, not silently dropped.
+
+**Free/leverage:** `sqlite3` is Python stdlib -- zero install, zero daemon,
+same "free and local" bar every prior domain met, just without needing
+Docker Desktop first.
 
 ## Sequencing note
 

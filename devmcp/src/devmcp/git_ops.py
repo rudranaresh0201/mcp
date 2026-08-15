@@ -41,13 +41,23 @@ def ensure_repo(repo_root: Path) -> None:
         _run(repo_root, "config", "user.name", "devmcp")
 
 
-def write_file(repo_root: Path, path: str, content: str) -> None:
+def resolve_safe_path(repo_root: Path, path: str) -> Path:
+    """Resolve `path` under `repo_root`, rejecting anything that would land
+    outside it -- absolute (Windows or POSIX) or via `../` traversal. Shared
+    by every tool that takes a client-supplied relative path, so this
+    security boundary can't drift between callers (the real bug this closed:
+    write_file used to do this inline only for itself, see ADR/ROADMAP Phase 5)."""
     if _WINDOWS_ABS_PATH_RE.match(path):
         raise ValueError(f"path {path!r} resolves outside repo root {repo_root}")
     repo_root = repo_root.resolve()
-    file_path = (repo_root / path).resolve()
-    if not file_path.is_relative_to(repo_root):
+    resolved = (repo_root / path).resolve()
+    if not resolved.is_relative_to(repo_root):
         raise ValueError(f"path {path!r} resolves outside repo root {repo_root}")
+    return resolved
+
+
+def write_file(repo_root: Path, path: str, content: str) -> None:
+    file_path = resolve_safe_path(repo_root, path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content)
 
