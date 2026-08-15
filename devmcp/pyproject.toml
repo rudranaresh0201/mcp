@@ -1,7 +1,7 @@
 [project]
 name = "devmcp-server"
-version = "0.2.1"
-description = "A from-scratch MCP server exposing git and CI tooling over the full protocol surface (tools, resources, prompts, roots, sampling)."
+version = "0.3.0"
+description = "A from-scratch MCP server exposing git, CI, filesystem, SQLite, and Docker tooling over the full protocol surface (tools, resources, prompts, roots, sampling)."
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [{name = "Rudra Naresh"}]

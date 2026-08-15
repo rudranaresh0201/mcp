@@ -6,6 +6,36 @@ lockstep since they've evolved together, despite having no import
 dependency on each other -- except when a release only changes one of the
 two (like 0.2.2 below), in which case only that package's version moves.
 
+## [0.3.0]
+
+### Added
+
+- **SQLite domain**: `sqlite_create_table`/`sqlite_insert_row` tools
+  (`devmcp`), independently verified by `SQLiteVerifier` (`verimcp`) --
+  reconnects fresh to the `.db` file and re-queries `sqlite_master`/the
+  claimed row's exact values, rather than trusting the tool's own report.
+  Both the tool and the verifier independently guard SQL identifier
+  injection, since table/column names can't be parameterized the way
+  values can.
+- **Schema-conformance layer**: `SchemaConformanceVerifier` (`verimcp`), a
+  generic, zero-setup verifier that validates a tool's `structuredContent`
+  against whatever `outputSchema` that tool itself declared in a real
+  `tools/list` response -- a real MCP spec field. Applies to *any* tool on
+  *any* backend that declares one, no per-tool verifier needed, closing
+  the "completely unverified on an unfamiliar tool" gap every prior
+  verifier had. Always on, not excludable via `--verifiers`. `devmcp`'s
+  five structuredContent-bearing tools now declare a real `outputSchema`
+  so this runs against real, not synthetic, data.
+- **Docker domain**: `docker_build_image`/`docker_run_container` tools
+  (`devmcp`), independently verified by `DockerVerifier` (`verimcp`) --
+  re-runs `docker inspect` on the claimed image tag or container id, and
+  for a run claim, compares the claimed exit code against the container's
+  real `.State.ExitCode`, not just existence.
+- `devmcp`'s `git_ops.write_file`'s path-traversal/absolute-path check is
+  now a shared `resolve_safe_path` helper, reused by every path-taking
+  tool (`write_file`, both `sqlite_*` tools, both `docker_*` tools)
+  instead of being duplicated per tool.
+
 ## [0.2.2] — verimcp only, `devmcp` unchanged at 0.2.1
 
 ### Added
