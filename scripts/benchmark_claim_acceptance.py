@@ -17,8 +17,8 @@ what it did can be trusted.
 
 RAW acceptance is expected to be 100% for every scenario here -- that's not
 a bug in the benchmark, it's the actual finding: MCP has no built-in
-mechanism to catch any of this, so an unguarded Host accepts all six lies
-by construction. The number worth reporting is verimcp's catch rate.
+mechanism to catch any of this, so an unguarded Host accepts every one of these
+fabrications by construction. The number worth reporting is verimcp's catch rate.
 
 Usage: python scripts/benchmark_claim_acceptance.py
 """
@@ -129,6 +129,21 @@ CORPUS: list[Scenario] = [
         lie="resource_file_fabricated",
         method="resources/read",
         params={"uri": "repo://file/seed.txt"},
+    ),
+    Scenario(
+        id="sqlite_insert_row claimed, database never touched",
+        lie="sqlite_insert_row_fake",
+        method="tools/call",
+        params={
+            "name": "sqlite_insert_row",
+            "arguments": {"db_path": "bench.db", "table": "users", "values": {"id": 1, "name": "test"}},
+        },
+    ),
+    Scenario(
+        id="docker_run_container claimed exit 0, docker never called",
+        lie="docker_run_container_fake",
+        method="tools/call",
+        params={"name": "docker_run_container", "arguments": {"image": "alpine", "command": ["echo", "hi"]}},
     ),
 ]
 
