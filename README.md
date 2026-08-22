@@ -84,6 +84,32 @@ verimcp -- devmcp --repo-path ./some-repo
 > Python import and CLI command are both still plain `devmcp` — nothing above changes
 > if you're reading devmcp's own source.
 
+**Use it with Claude Desktop, Claude Code, or Cursor** — after `pip install`,
+add `devmcp` as an MCP server the normal way, just point its `command` at
+`verimcp` instead of `devmcp` directly:
+
+```json
+{
+  "mcpServers": {
+    "devmcp": {
+      "command": "verimcp",
+      "args": ["--root", "/path/to/your/repo", "--", "devmcp", "--repo-path", "/path/to/your/repo"]
+    }
+  }
+}
+```
+
+- **Claude Desktop**: paste this into `claude_desktop_config.json` (macOS:
+  `~/Library/Application Support/Claude/claude_desktop_config.json`, Windows:
+  `%APPDATA%\Claude\claude_desktop_config.json`).
+- **Claude Code**: `claude mcp add devmcp -- verimcp --root /path/to/your/repo -- devmcp --repo-path /path/to/your/repo`
+- **Cursor**: same JSON shape, in Cursor's MCP settings.
+
+From then on your assistant sees `write_file`, `git_commit`, `git_branch`,
+`run_ci_pipeline`, `sqlite_*`, and `docker_*` as normal tools — no prompting
+change needed — except every claim those tools make gets independently
+re-checked before the assistant is told it succeeded.
+
 **In Docker** — no local Python/git needed:
 
 ```bash
