@@ -122,7 +122,7 @@ header {
   border-bottom: 1px solid var(--line);
 }
 
-.stat { background: var(--panel); padding: 0.85rem 1.15rem 0.95rem; position: relative; min-width: 0; }
+.stat { background: var(--panel); padding: 0.62rem 1.15rem 0.7rem; position: relative; min-width: 0; }
 .stat::before { content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 2px; background: var(--rail, transparent); }
 .stat.is-caught { --rail: var(--caught); }
 .stat.is-ok     { --rail: var(--verified); }
@@ -180,9 +180,9 @@ main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 29rem; min-
 
 .row {
   display: grid;
-  grid-template-columns: 2.9rem 4.9rem minmax(0, 1fr) auto;
+  grid-template-columns: 4.3rem 4.9rem minmax(0, 1fr) auto;
   gap: 0.8rem; align-items: center;
-  padding: 0.6rem 1rem 0.6rem 0.7rem;
+  padding: 0.42rem 1rem 0.42rem 0.7rem;
   border-bottom: 1px solid var(--line-soft);
   border-left: 3px solid transparent;
   cursor: pointer; font-family: var(--mono); font-size: 0.77rem;
@@ -281,7 +281,7 @@ pre {
    found on disk / in the repo / in the process exit code. */
 .diff {
   border: 1px solid var(--caught); border-radius: 3px; overflow: hidden;
-  margin: 1.15rem 0 1rem; background: var(--ground);
+  margin: 0 0 1.15rem; background: var(--ground);
   box-shadow: 0 0 0 1px rgba(255,59,96,0.12), 0 12px 34px -18px var(--caught);
 }
 .diff-head {
@@ -437,7 +437,11 @@ function rowNode(e, index, animate) {
   };
 
   const verdict = cell("verdict " + v.cls, v.label);
-  row.append(cell("seq", "#" + (e.seq ?? "?")), cell("time", clockOf(e.timestamp)),
+  /* session-prefixed, because seq restarts per session -- five separate
+     one-call sessions all rendering "#1" reads as a broken list, not as
+     five distinct events. */
+  const ident = (e.session_id ? e.session_id.slice(0, 4) : "????") + "·" + (e.seq ?? "?");
+  row.append(cell("seq", ident), cell("time", clockOf(e.timestamp)),
              cell("target", e.target || e.method || "(unknown)"), verdict);
 
   row.addEventListener("click", () => select(index));
@@ -519,6 +523,20 @@ function diffLine(kind, who, body) {
   return line;
 }
 
+function contradiction(e) {
+  const verifiers = (e.verification && e.verification.verifiers) || [];
+  const diff = el("div", "diff");
+  const head = el("div", "diff-head");
+  head.append(el("span", null, "claim vs. re-derived reality"));
+  head.append(el("span", null, e.target || ""));
+  diff.append(head);
+  diff.append(diffLine("minus", "backend claimed",
+    "the call succeeded" + (verifiers.length ? "  ·  checked by " + verifiers.join(", ") : "")));
+  diff.append(diffLine("plus", "verimcp independently found",
+    (e.verification && e.verification.detail) || "no reason recorded (log predates verification.detail)"));
+  return diff;
+}
+
 function renderInspector() {
   const pane = $("pane");
   pane.textContent = "";
@@ -531,6 +549,12 @@ function renderInspector() {
 
   const e = state.events[state.selected];
   pane.append(pipeline(e));
+
+  /* The contradiction goes directly under the pipeline, above the metadata.
+     It was previously appended last, which put the single most important
+     thing in the panel below the fold on a 1080p screen -- method, target,
+     session and a JSON argument dump all outranked it for no reason. */
+  if (isCaught(e)) pane.append(contradiction(e));
 
   const dl = el("dl");
   dl.style.margin = "0";
@@ -553,17 +577,6 @@ function renderInspector() {
   pane.append(dl);
 
   if (isCaught(e)) {
-    const diff = el("div", "diff");
-    const head = el("div", "diff-head");
-    head.append(el("span", null, "claim vs. re-derived reality"));
-    head.append(el("span", null, e.target || ""));
-    diff.append(head);
-    diff.append(diffLine("minus", "backend claimed",
-      "the call succeeded" + (verifiers.length ? "  ·  checked by " + verifiers.join(", ") : "")));
-    diff.append(diffLine("plus", "verimcp independently found",
-      (e.verification && e.verification.detail) || "no reason recorded (log predates verification.detail)"));
-    pane.append(diff);
-
     const note = el("p", "note");
     note.append(document.createTextNode("The Host never saw the success. verimcp rewrote this response to "));
     note.append(el("b", null, "isError: true"));
