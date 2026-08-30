@@ -74,7 +74,7 @@ def create_app(audit_log: Path, replay_delay: float | None = None):
     return app
 
 
-async def _send(socket, kind: str, events: list[dict], seen: list[dict]) -> None:
+async def _send(socket, kind: str, events: list[dict], seen: list[dict], mode: str = "live") -> None:
     """Every frame carries the recomputed summary alongside the new events.
 
     Recomputing rather than incrementing counters client-side is a deliberate
@@ -82,7 +82,7 @@ async def _send(socket, kind: str, events: list[dict], seen: list[dict]) -> None
     are a pure function of the events on screen -- a drifting counter in a
     tool that exists to be trusted is worse than a slow one.
     """
-    await socket.send_json({"type": kind, "events": events, "summary": summarize(seen)})
+    await socket.send_json({"type": kind, "mode": mode, "events": events, "summary": summarize(seen)})
 
 
 async def _follow(socket, audit_log: Path) -> None:
@@ -106,12 +106,12 @@ async def _replay(socket, audit_log: Path, delay: float) -> None:
     the console fill from nothing -- the same shape a live session has, which
     is the point of recording it.
     """
-    await _send(socket, "snapshot", [], [])
+    await _send(socket, "snapshot", [], [], mode="replay")
     seen: list[dict] = []
     for event in read_events(audit_log):
         await asyncio.sleep(delay)
         seen.append(event)
-        await _send(socket, "append", [event], seen)
+        await _send(socket, "append", [event], seen, mode="replay")
 
     # Hold the connection open on the final frame instead of returning.
     # Returning closes the socket, the client's reconnect fires, and the

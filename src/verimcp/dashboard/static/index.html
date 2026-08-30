@@ -103,6 +103,11 @@ header {
 .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); flex: none; }
 .status[data-live="true"] { color: var(--verified); border-color: rgba(36, 224, 141, 0.3); }
 .status[data-live="true"] .dot { background: var(--verified); box-shadow: 0 0 8px var(--verified); animation: pulse 2s ease-in-out infinite; }
+/* Replay is a recording, not traffic. Labelling it "live" would be the
+   console asserting something it has not checked -- the exact habit this
+   whole project exists to break. */
+.status[data-live="replay"] { color: var(--gate); border-color: rgba(255, 178, 69, 0.35); }
+.status[data-live="replay"] .dot { background: var(--gate); box-shadow: 0 0 8px var(--gate); }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
 .logpath {
@@ -621,6 +626,8 @@ function connect() {
   socket.addEventListener("message", (ev) => {
     const msg = JSON.parse(ev.data);
     const firstNew = state.events.length;
+
+    if (msg.mode === "replay") setStatus("replay", "replay · recorded");
 
     if (msg.type === "snapshot") {
       state.events = msg.events;
