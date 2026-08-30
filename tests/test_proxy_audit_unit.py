@@ -7,6 +7,7 @@ from pathlib import Path
 
 from verimcp import audit_resource
 from verimcp.proxy import Proxy
+from tests.test_verifiers_base import _StubVerifier
 
 
 def _proxy(tmp_path: Path) -> Proxy:
@@ -86,3 +87,63 @@ def test_record_completed_audit_uses_stashed_approval_meta(tmp_path: Path):
     assert entries[0]["gate"] == {"action": "require_approval", "reason": "approved by Host"}
     assert entries[0]["approval"] == {"status": "accept"}
     assert entries[0]["outcome"] == "forwarded"
+
+
+def test_completed_audit_records_why_verification_failed(tmp_path: Path):
+    """`passed: false` alone is enough to alert on but not enough to explain
+    -- without the detail, anyone reading the log has to re-derive the
+    contradiction by hand. This is what the dashboard renders as
+    claim-vs-reality."""
+    proxy = _proxy(tmp_path)
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "git_commit", "arguments": {}}}
+    response = _StubVerifier._override({"jsonrpc": "2.0", "id": 1, "result": {}}, "claimed commit 'deadbeef' does not exist")
+
+    proxy._record_completed_audit(request, response, verifiers_run=[_StubVerifier()])
+
+    entry = proxy._audit.read_all()[-1]
+    assert entry["outcome"] == "verified_failed"
+    assert entry["verification"]["passed"] is False
+    assert entry["verification"]["detail"] == "claimed commit 'deadbeef' does not exist"
+
+
+def test_a_backends_own_error_is_not_recorded_as_a_caught_lie(tmp_path: Path):
+    """The conflation found on 2026-08-30 by running the real fixture: the
+    verifier ran and the call failed, but nothing was contradicted -- the
+    backend reported its own failure. Recording that as `verified_failed`
+    inflated a demo run to 6 catches where only 2 claims had actually been
+    disproven. `passed` is None, not False, so anything filtering on a real
+    catch cannot pick this up by mistake."""
+    proxy = _proxy(tmp_path)
+    request = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "git_commit", "arguments": {}}}
+    response = {"jsonrpc": "2.0", "id": 2, "result": {"isError": True, "content": [{"type": "text", "text": "fatal: no repo"}]}}
+
+    proxy._record_completed_audit(request, response, verifiers_run=[_StubVerifier()])
+
+    entry = proxy._audit.read_all()[-1]
+    assert entry["outcome"] == "backend_error"
+    assert entry["verification"]["passed"] is None
+    assert "detail" not in entry["verification"]
+
+
+def test_a_verified_success_still_records_passed_true(tmp_path: Path):
+    proxy = _proxy(tmp_path)
+    request = {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "git_commit", "arguments": {}}}
+
+    proxy._record_completed_audit(request, {"jsonrpc": "2.0", "id": 4, "result": {"isError": False}}, [_StubVerifier()])
+
+    entry = proxy._audit.read_all()[-1]
+    assert entry["outcome"] == "verified_ok"
+    assert entry["verification"]["passed"] is True
+
+
+def test_completed_audit_has_no_verification_block_when_nothing_could_check_it(tmp_path: Path):
+    """The honest third state: forwarded, unverified. Distinct from passing
+    -- conflating them would let an unchecked call read as a confirmed one."""
+    proxy = _proxy(tmp_path)
+    request = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "unknown_tool", "arguments": {}}}
+
+    proxy._record_completed_audit(request, {"jsonrpc": "2.0", "id": 3, "result": {}}, verifiers_run=[])
+
+    entry = proxy._audit.read_all()[-1]
+    assert entry["outcome"] == "forwarded"
+    assert entry["verification"] is None

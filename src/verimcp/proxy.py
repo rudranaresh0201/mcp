@@ -25,7 +25,7 @@ from verimcp.audit import AuditStore
 from verimcp.gates.base import RequestGate
 from verimcp.gates.sampling_rate_limit import SamplingRateLimitGate
 from verimcp.gates.tool_call_policy import ToolCallPolicyGate
-from verimcp.verifiers import registry
+from verimcp.verifiers import base as verifier_base, registry
 from verimcp.verifiers.schema_conformance import SchemaConformanceVerifier
 
 FILE_URI_PREFIX = "file://"
@@ -505,8 +505,35 @@ class Proxy:
             verification = None
         else:
             is_error = "error" in response or bool(response.get("result", {}).get("isError"))
-            outcome = "verified_failed" if is_error else "verified_ok"
-            verification = {"verifiers": [type(v).__name__ for v in verifiers_run], "passed": not is_error}
+            # What the check actually found, not just that it failed -- and
+            # also which of two very different failures this was. `detail` is
+            # non-None only for a verimcp-authored override, i.e. only when a
+            # verifier independently contradicted a success claim.
+            detail = verifier_base.extract_failure_detail(response)
+
+            if not is_error:
+                # A success claim that survived independent re-derivation.
+                outcome, passed = "verified_ok", True
+            elif detail is not None:
+                # A success claim that reality contradicted. The only outcome
+                # that represents work this system actually did.
+                outcome, passed = "verified_failed", False
+            else:
+                # The backend reported its own failure, so there was never a
+                # success claim to check. Recording this as `verified_failed`
+                # (as this did until 2026-08-30) conflates "a verifier caught
+                # a lie" with "the tool admitted it failed", which inflates
+                # every catch-rate read off this log -- the demo run that
+                # surfaced it showed 6 caught where only 2 claims had actually
+                # been disproven. `passed` is None rather than False for the
+                # same reason: no claim was checked, so neither verdict is
+                # true, and False would be indistinguishable from a real catch
+                # to anything filtering on it.
+                outcome, passed = "backend_error", None
+
+            verification = {"verifiers": [type(v).__name__ for v in verifiers_run], "passed": passed}
+            if detail is not None:
+                verification["detail"] = detail
 
         self._record_audit(request, outcome=outcome, gate=gate, verification=verification, approval=approval)
 

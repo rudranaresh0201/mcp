@@ -52,7 +52,11 @@ _duration_histogram = _meter.create_histogram(
 # Outcomes AuditStore.record already uses for a denial/failure -- kept in
 # sync with proxy.py's outcome strings rather than re-deriving them, since
 # they're the same "what happened" vocabulary the audit log already commits to.
-_ERROR_OUTCOMES = {"denied", "verified_failed"}
+# The call did not succeed. `backend_error` belongs here even though no
+# verifier caught anything -- for a span's status, what matters is that the
+# tool failed; *why* is the audit log's job, and the two answer different
+# questions on purpose.
+_ERROR_OUTCOMES = {"denied", "verified_failed", "backend_error"}
 
 _provider_holders: dict[str, Any] = {"tracer_provider": None, "meter_provider": None}
 

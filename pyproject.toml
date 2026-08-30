@@ -34,6 +34,7 @@ Repository = "https://github.com/rudranaresh0201/mcp"
 
 [project.scripts]
 verimcp = "verimcp.cli:main"
+verimcp-dashboard = "verimcp.dashboard.server:main"
 
 [project.entry-points."verimcp.verifiers"]
 filesystem = "verimcp.verifiers.filesystem:FilesystemVerifier"
@@ -54,6 +55,14 @@ docker = "verimcp.verifiers.docker:DockerVerifier"
 otel = [
     "opentelemetry-sdk>=1.27",
     "opentelemetry-exporter-otlp-proto-grpc>=1.27",
+]
+# The console (verimcp-dashboard): reads the audit log a proxy run already
+# wrote and streams it to a browser. Optional because verimcp's own proxy
+# path never imports it -- a core install stays free of a web framework, the
+# same way `otel` keeps exporter deps out of it.
+dashboard = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
 ]
 dev = [
     "pytest>=8.0",
@@ -90,3 +99,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 timeout = 30
+
+# index.html is the console itself, not a build artifact -- it must ship
+# inside the wheel or `verimcp-dashboard` serves a 404 after a pip install.
+[tool.setuptools.package-data]
+verimcp = ["dashboard/static/*.html"]

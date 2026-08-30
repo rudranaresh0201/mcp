@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>verimcp console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+/* A console for a trust layer. Committed dark, single theme: it is read
+   beside a terminal, and the semantic trio -- caught / verified / unchecked
+   -- needs a low-luminance ground to carry meaning rather than decorate it. */
+:root {
+  --ground:    #070A0F;
+  --panel:     #0D121C;
+  --raised:    #131A27;
+  --line:      #1D2636;
+  --line-soft: #151C29;
+
+  --text:  #EAEFF9;
+  --muted: #7C89A2;
+  --dim:   #47526A;
+
+  /* The hero. Everything else is deliberately quieter than this. */
+  --caught:      #FF3B60;
+  --caught-glow: rgba(255, 59, 96, 0.14);
+  --caught-bg:   #1F0912;
+  --verified:    #24E08D;
+  --verified-bg: #06231A;
+  /* Dull on purpose: "nobody could check this" is not a success and must
+     never read like one. */
+  --unverified:  #64708A;
+  --backend:     #C58BFF;
+  --gate:        #FFB245;
+  --accent:      #38E5F0;
+
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  --sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background:
+    radial-gradient(1100px 460px at 22% -12%, rgba(56, 229, 240, 0.09), transparent 62%),
+    radial-gradient(760px 380px at 96% 4%, rgba(255, 59, 96, 0.07), transparent 60%),
+    linear-gradient(var(--line-soft) 1px, transparent 1px) 0 0 / 100% 34px,
+    var(--ground);
+}
+
+/* ---------------- header ---------------- */
+
+header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1.1rem;
+  padding: 0.8rem 1.3rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(13, 18, 28, 0.82);
+  backdrop-filter: blur(10px);
+}
+
+.brand { display: flex; align-items: center; gap: 0.6rem; }
+.glyph {
+  width: 21px; height: 21px; flex: none;
+  border: 1.5px solid var(--accent);
+  border-radius: 3px;
+  position: relative;
+}
+.glyph::after {
+  content: "";
+  position: absolute;
+  inset: 4px 4px auto 4px;
+  height: 6px;
+  border-left: 1.5px solid var(--accent);
+  border-bottom: 1.5px solid var(--accent);
+  transform: rotate(-45deg) translate(1px, -1px);
+}
+.brand-text { font-weight: 700; font-size: 0.94rem; letter-spacing: -0.015em; }
+.brand-text span { color: var(--muted); font-weight: 500; }
+
+.status {
+  display: flex; align-items: center; gap: 0.45rem;
+  font-family: var(--mono); font-size: 0.67rem;
+  letter-spacing: 0.13em; text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 100px;
+  padding: 0.2rem 0.6rem 0.2rem 0.5rem;
+}
+.dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim); flex: none; }
+.status[data-live="true"] { color: var(--verified); border-color: rgba(36, 224, 141, 0.3); }
+.status[data-live="true"] .dot { background: var(--verified); box-shadow: 0 0 8px var(--verified); animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.logpath {
+  font-family: var(--mono); font-size: 0.7rem; color: var(--dim);
+  margin-left: auto; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 38ch;
+}
+
+/* ---------------- stat strip ---------------- */
+
+.stats {
+  flex: none;
+  display: grid;
+  grid-template-columns: 1.45fr 1fr 1fr 1fr 1fr;
+  gap: 1px;
+  background: var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.stat { background: var(--panel); padding: 0.85rem 1.15rem 0.95rem; position: relative; min-width: 0; }
+.stat::before { content: ""; position: absolute; top: 0; left: 0; width: 100%; height: 2px; background: var(--rail, transparent); }
+.stat.is-caught { --rail: var(--caught); }
+.stat.is-ok     { --rail: var(--verified); }
+.stat.is-unver  { --rail: var(--unverified); }
+.stat.is-back   { --rail: var(--backend); }
+.stat.is-total  { --rail: var(--accent); }
+
+.stat dt {
+  font-family: var(--mono); font-size: 0.61rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 0.3rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.stat dd {
+  margin: 0; font-size: 1.5rem; font-weight: 600; line-height: 1;
+  letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
+}
+.stat.is-caught dd { font-size: 2.15rem; font-weight: 700; }
+.stat.is-caught dd[data-nonzero="true"] { color: var(--caught); text-shadow: 0 0 26px var(--caught-glow); }
+.stat.is-ok dd[data-nonzero="true"]     { color: var(--verified); }
+.stat.is-back dd[data-nonzero="true"]   { color: var(--backend); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .stat dd.bump { animation: bump 0.5s cubic-bezier(0.2, 0.9, 0.3, 1); }
+  @keyframes bump { 0% { transform: scale(1); } 35% { transform: scale(1.16); } 100% { transform: scale(1); } }
+}
+
+/* ---------------- layout ---------------- */
+
+main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 29rem; min-height: 0; }
+.stream, .inspector { min-height: 0; display: flex; flex-direction: column; }
+.inspector { border-left: 1px solid var(--line); background: rgba(13, 18, 28, 0.6); }
+
+.bar {
+  flex: none; display: flex; align-items: center; gap: 0.35rem;
+  padding: 0.55rem 1rem; border-bottom: 1px solid var(--line-soft);
+}
+.bar h2 {
+  margin: 0 auto 0 0; font-family: var(--mono); font-size: 0.63rem;
+  font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted);
+}
+
+.chip {
+  font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.06em;
+  color: var(--muted); background: transparent;
+  border: 1px solid var(--line); border-radius: 2px;
+  padding: 0.2rem 0.5rem; cursor: pointer; transition: color 0.12s, border-color 0.12s;
+}
+.chip:hover { color: var(--text); border-color: var(--dim); }
+.chip[aria-pressed="true"] { color: var(--ground); background: var(--accent); border-color: var(--accent); font-weight: 700; }
+.chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.rows { flex: 1; overflow-y: auto; overflow-x: hidden; }
+
+/* ---------------- event row ---------------- */
+
+.row {
+  display: grid;
+  grid-template-columns: 2.9rem 4.9rem minmax(0, 1fr) auto;
+  gap: 0.8rem; align-items: center;
+  padding: 0.6rem 1rem 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--line-soft);
+  border-left: 3px solid transparent;
+  cursor: pointer; font-family: var(--mono); font-size: 0.77rem;
+  transition: background 0.12s;
+  position: relative;
+}
+.row:hover { background: var(--raised); }
+.row[aria-selected="true"] { background: var(--raised); border-left-color: var(--accent); }
+.row.caught { border-left-color: var(--caught); background: linear-gradient(90deg, var(--caught-bg), transparent 58%); }
+.row.caught[aria-selected="true"] { background: linear-gradient(90deg, #2C0C17, var(--raised) 58%); }
+.row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+
+.row .seq  { color: var(--dim); font-variant-numeric: tabular-nums; }
+.row .time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.row .target { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.caught .target { color: var(--caught); font-weight: 600; }
+
+.verdict {
+  font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700;
+  padding: 0.16rem 0.44rem; border: 1px solid currentColor; border-radius: 2px; white-space: nowrap;
+}
+.v-caught     { color: var(--caught); background: var(--caught-bg); }
+.v-verified   { color: var(--verified); }
+.v-unverified { color: var(--unverified); }
+.v-backend    { color: var(--backend); }
+.v-gate       { color: var(--gate); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .row.new { animation: land 0.45s cubic-bezier(0.16, 1, 0.3, 1); }
+  @keyframes land { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+  .row.new.caught::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(90deg, rgba(255,59,96,0.32), transparent 70%);
+    animation: flare 0.75s ease-out forwards;
+  }
+  @keyframes flare { to { opacity: 0; } }
+}
+
+/* ---------------- inspector ---------------- */
+
+.pane { flex: 1; overflow-y: auto; padding: 1rem 1.1rem 2rem; }
+
+.empty {
+  height: 100%; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 0.7rem;
+  color: var(--dim); font-family: var(--mono); font-size: 0.73rem;
+  text-align: center; padding: 2rem; line-height: 1.8; white-space: pre-line;
+}
+
+/* the verification pipeline: what actually happened to this message */
+.pipeline {
+  display: flex; align-items: stretch; gap: 0;
+  border: 1px solid var(--line); border-radius: 3px;
+  overflow: hidden; margin-bottom: 1.1rem; background: var(--ground);
+}
+.stage {
+  flex: 1; min-width: 0; padding: 0.5rem 0.35rem;
+  text-align: center; font-family: var(--mono);
+  font-size: 0.55rem; letter-spacing: 0.09em; text-transform: uppercase;
+  color: var(--dim); border-right: 1px solid var(--line-soft);
+  display: flex; flex-direction: column; gap: 0.2rem; align-items: center;
+}
+.stage:last-child { border-right: 0; }
+.stage b { font-size: 0.72rem; letter-spacing: 0; font-weight: 600; }
+.stage.done { color: var(--muted); }
+.stage.done b { color: var(--text); }
+.stage.hit  { color: var(--caught); background: var(--caught-bg); }
+.stage.hit b { color: var(--caught); }
+.stage.pass { color: var(--verified); }
+.stage.pass b { color: var(--verified); }
+.stage.skip b { color: var(--dim); }
+
+.field { margin-bottom: 0.95rem; }
+.field > dt {
+  font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 0.3rem;
+}
+.field > dd { margin: 0; font-family: var(--mono); font-size: 0.78rem; color: var(--text); word-break: break-word; }
+
+pre {
+  margin: 0; font-family: var(--mono); font-size: 0.72rem; line-height: 1.6;
+  color: var(--text); background: var(--ground); border: 1px solid var(--line);
+  border-radius: 3px; padding: 0.6rem 0.7rem; overflow-x: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+.badges { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.badge {
+  font-family: var(--mono); font-size: 0.65rem; color: var(--accent);
+  border: 1px solid rgba(56, 229, 240, 0.28); border-radius: 2px; padding: 0.14rem 0.4rem;
+}
+
+/* THE MONEY SHOT — a claim and the reality that contradicts it, as a diff.
+   Diff notation because every engineer reads it without a legend: the minus
+   line is what the backend asserted, the plus line is what was actually
+   found on disk / in the repo / in the process exit code. */
+.diff {
+  border: 1px solid var(--caught); border-radius: 3px; overflow: hidden;
+  margin: 1.15rem 0 1rem; background: var(--ground);
+  box-shadow: 0 0 0 1px rgba(255,59,96,0.12), 0 12px 34px -18px var(--caught);
+}
+.diff-head {
+  font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.15em;
+  text-transform: uppercase; color: var(--caught);
+  padding: 0.42rem 0.7rem; border-bottom: 1px solid var(--line);
+  background: var(--caught-bg); display: flex; justify-content: space-between; gap: 0.5rem;
+}
+.diff-line {
+  display: grid; grid-template-columns: 1.5rem minmax(0, 1fr);
+  font-family: var(--mono); font-size: 0.735rem; line-height: 1.65;
+  border-bottom: 1px solid var(--line-soft);
+}
+.diff-line:last-child { border-bottom: 0; }
+.diff-line > .sign { text-align: center; user-select: none; font-weight: 700; padding: 0.5rem 0; }
+.diff-line > .body { padding: 0.5rem 0.6rem 0.5rem 0; word-break: break-word; }
+.diff-line.minus { background: rgba(255, 59, 96, 0.07); }
+.diff-line.minus > .sign { color: var(--caught); }
+.diff-line.plus  { background: rgba(36, 224, 141, 0.06); }
+.diff-line.plus  > .sign { color: var(--verified); }
+.diff-line .who {
+  display: block; font-size: 0.57rem; letter-spacing: 0.13em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 0.16rem;
+}
+
+.note {
+  font-size: 0.72rem; line-height: 1.65; color: var(--muted);
+  border-left: 2px solid var(--line); padding-left: 0.7rem; margin-top: 1rem;
+}
+.note b { color: var(--text); font-weight: 600; }
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
+::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+
+@media (max-width: 960px) {
+  main { grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr auto; }
+  .inspector { border-left: 0; border-top: 1px solid var(--line); max-height: 48vh; }
+  .stats { grid-template-columns: repeat(3, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="glyph" aria-hidden="true"></div>
+    <div class="brand-text">verimcp <span>console</span></div>
+  </div>
+  <div class="status" id="status" data-live="false"><i class="dot"></i><span id="status-text">connecting</span></div>
+  <div class="logpath" id="logpath"></div>
+</header>
+
+<dl class="stats">
+  <div class="stat is-caught"><dt>Claims disproven</dt><dd id="s-caught">0</dd></div>
+  <div class="stat is-total"><dt>Calls observed</dt><dd id="s-total">0</dd></div>
+  <div class="stat is-ok"><dt>Verified true</dt><dd id="s-verified">0</dd></div>
+  <div class="stat is-back"><dt>Backend errors</dt><dd id="s-backend">0</dd></div>
+  <div class="stat is-unver"><dt>Uncheckable</dt><dd id="s-unver">0</dd></div>
+</dl>
+
+<main>
+  <section class="stream">
+    <div class="bar">
+      <h2>Event stream</h2>
+      <button class="chip" data-filter="all" aria-pressed="true">All</button>
+      <button class="chip" data-filter="caught" aria-pressed="false">Disproven</button>
+      <button class="chip" data-filter="verified" aria-pressed="false">Verified</button>
+      <button class="chip" data-filter="other" aria-pressed="false">Other</button>
+    </div>
+    <div class="rows" id="rows" role="listbox" aria-label="Audit events"></div>
+  </section>
+
+  <aside class="inspector">
+    <div class="bar"><h2>Inspector</h2></div>
+    <div class="pane" id="pane"></div>
+  </aside>
+</main>
+
+<script>
+"use strict";
+
+const state = { events: [], filter: "all", selected: null, prev: {} };
+const $ = (id) => document.getElementById(id);
+
+/* Mirrors verimcp.dashboard.events on the server. The three-way split is the
+   whole point: a call that failed is not the same as a claim that was
+   disproven, and neither is the same as a call nobody could check. */
+const isCaught     = (e) => !!(e.verification && e.verification.passed === false);
+const isVerified   = (e) => !!(e.verification && e.verification.passed === true);
+const isBackendErr = (e) => e.outcome === "backend_error";
+const isUnchecked  = (e) => !e.verification;
+
+function verdictOf(e) {
+  if (isCaught(e))     return { cls: "v-caught", label: "disproven" };
+  if (isVerified(e))   return { cls: "v-verified", label: "verified" };
+  if (isBackendErr(e)) return { cls: "v-backend", label: "tool error" };
+  if (e.gate)          return { cls: "v-gate", label: e.outcome || "gated" };
+  return { cls: "v-unverified", label: "unchecked" };
+}
+
+function matchesFilter(e) {
+  if (state.filter === "caught")   return isCaught(e);
+  if (state.filter === "verified") return isVerified(e);
+  if (state.filter === "other")    return !isCaught(e) && !isVerified(e);
+  return true;
+}
+
+const clockOf = (iso) => {
+  if (!iso) return "--:--:--";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "--:--:--" : d.toTimeString().slice(0, 8);
+};
+
+/* ---------- stats ---------- */
+
+function renderStats(summary) {
+  const set = (id, value) => {
+    const el = $(id);
+    const text = String(value);
+    if (state.prev[id] !== undefined && state.prev[id] !== text) {
+      el.classList.remove("bump");
+      void el.offsetWidth;      /* restart the animation */
+      el.classList.add("bump");
+    }
+    state.prev[id] = text;
+    el.textContent = text;
+    el.dataset.nonzero = String(Number(value) > 0);
+  };
+  set("s-caught", summary.caught);
+  set("s-total", summary.total);
+  set("s-verified", summary.verified);
+  set("s-backend", summary.backend_errors ?? 0);
+  set("s-unver", summary.unverified);
+}
+
+/* ---------- stream ---------- */
+
+function rowNode(e, index, animate) {
+  const v = verdictOf(e);
+  const row = document.createElement("div");
+  row.className = "row" + (isCaught(e) ? " caught" : "") + (animate ? " new" : "");
+  row.setAttribute("role", "option");
+  row.setAttribute("aria-selected", String(state.selected === index));
+  row.tabIndex = 0;
+
+  const cell = (cls, text) => {
+    const s = document.createElement("span");
+    s.className = cls;
+    s.textContent = text;
+    return s;
+  };
+
+  const verdict = cell("verdict " + v.cls, v.label);
+  row.append(cell("seq", "#" + (e.seq ?? "?")), cell("time", clockOf(e.timestamp)),
+             cell("target", e.target || e.method || "(unknown)"), verdict);
+
+  row.addEventListener("click", () => select(index));
+  row.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); select(index); }
+  });
+  return row;
+}
+
+function renderRows(animateFrom) {
+  const host = $("rows");
+  host.textContent = "";
+  const visible = state.events.map((e, i) => [e, i]).filter(([e]) => matchesFilter(e));
+
+  if (visible.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = state.events.length
+      ? "No events match this filter."
+      : "Waiting for the first tool call…\n\nStart verimcp with --audit-log\npointed at this file.";
+    host.append(empty);
+    return;
+  }
+  /* Newest first: a console is scanned from the top, and the event that
+     matters most is the one that just happened. */
+  for (const [e, i] of visible.reverse()) {
+    host.append(rowNode(e, i, animateFrom !== undefined && i >= animateFrom));
+  }
+}
+
+/* ---------- inspector ---------- */
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function field(label, node) {
+  const wrap = el("div", "field");
+  wrap.append(el("dt", null, label));
+  const dd = el("dd");
+  if (typeof node === "string") dd.textContent = node;
+  else dd.append(node);
+  wrap.append(dd);
+  return wrap;
+}
+
+/* What actually happened to this message, stage by stage. Renders the
+   architecture as much as the event -- someone seeing a screenshot with no
+   context can read the pipeline off the top of the panel. */
+function pipeline(e) {
+  const wrap = el("div", "pipeline");
+  const caught = isCaught(e), verified = isVerified(e), checked = !!e.verification;
+
+  const stage = (cls, label, value) => {
+    const s = el("div", "stage " + cls);
+    s.append(el("b", null, value), document.createTextNode(label));
+    return s;
+  };
+
+  wrap.append(stage("done", "call", e.method === "resources/read" ? "read" : "tool"));
+  wrap.append(stage(e.gate ? "hit" : "skip", "gate", e.gate ? "policy" : "—"));
+  wrap.append(stage("done", "forward", "sent"));
+  wrap.append(stage(checked ? "done" : "skip", "re-derive", checked ? "ran" : "—"));
+  wrap.append(stage(caught ? "hit" : verified ? "pass" : "skip", "verdict",
+                    caught ? "✕" : verified ? "✓" : "—"));
+  return wrap;
+}
+
+function diffLine(kind, who, body) {
+  const line = el("div", "diff-line " + kind);
+  line.append(el("span", "sign", kind === "minus" ? "−" : "+"));
+  const b = el("div", "body");
+  b.append(el("span", "who", who));
+  b.append(document.createTextNode(body));
+  line.append(b);
+  return line;
+}
+
+function renderInspector() {
+  const pane = $("pane");
+  pane.textContent = "";
+
+  if (state.selected === null || !state.events[state.selected]) {
+    pane.append(el("div", "empty",
+      "Select an event to inspect the claim\nand what verimcp independently found."));
+    return;
+  }
+
+  const e = state.events[state.selected];
+  pane.append(pipeline(e));
+
+  const dl = el("dl");
+  dl.style.margin = "0";
+  dl.append(field("Method", e.method || "—"));
+  dl.append(field("Target", e.target || "—"));
+  dl.append(field("Session", (e.session_id || "—") + "  ·  seq " + (e.seq ?? "?")));
+
+  if (e.arguments && Object.keys(e.arguments).length) {
+    dl.append(field("Arguments", el("pre", null, JSON.stringify(e.arguments, null, 2))));
+  }
+
+  const verifiers = (e.verification && e.verification.verifiers) || [];
+  if (verifiers.length) {
+    const badges = el("div", "badges");
+    for (const name of verifiers) badges.append(el("span", "badge", name));
+    dl.append(field("Verifiers run", badges));
+  }
+  if (e.gate) dl.append(field("Policy gate", el("pre", null, JSON.stringify(e.gate, null, 2))));
+  if (e.approval) dl.append(field("Approval", el("pre", null, JSON.stringify(e.approval, null, 2))));
+  pane.append(dl);
+
+  if (isCaught(e)) {
+    const diff = el("div", "diff");
+    const head = el("div", "diff-head");
+    head.append(el("span", null, "claim vs. re-derived reality"));
+    head.append(el("span", null, e.target || ""));
+    diff.append(head);
+    diff.append(diffLine("minus", "backend claimed",
+      "the call succeeded" + (verifiers.length ? "  ·  checked by " + verifiers.join(", ") : "")));
+    diff.append(diffLine("plus", "verimcp independently found",
+      (e.verification && e.verification.detail) || "no reason recorded (log predates verification.detail)"));
+    pane.append(diff);
+
+    const note = el("p", "note");
+    note.append(document.createTextNode("The Host never saw the success. verimcp rewrote this response to "));
+    note.append(el("b", null, "isError: true"));
+    note.append(document.createTextNode(" before forwarding, so the agent acted on the contradiction, not the claim."));
+    pane.append(note);
+  } else if (isBackendErr(e)) {
+    const note = el("p", "note");
+    note.append(el("b", null, "Not a catch. "));
+    note.append(document.createTextNode(
+      "The tool failed and reported it honestly, so no claim was ever made to contradict. "
+      + "Counted separately — folding this into the disproven total would inflate the headline number."));
+    pane.append(note);
+  } else if (isUnchecked(e)) {
+    const note = el("p", "note");
+    note.append(el("b", null, "Forwarded unchecked. "));
+    note.append(document.createTextNode(
+      "No registered verifier applies to this tool. This is not a pass; it is an absence of evidence, "
+      + "which is why it has its own counter rather than being rolled into the verified total."));
+    pane.append(note);
+  }
+}
+
+function select(index) {
+  state.selected = index;
+  renderRows();
+  renderInspector();
+}
+
+/* ---------- socket ---------- */
+
+function setStatus(live, text) {
+  $("status").dataset.live = String(live);
+  $("status-text").textContent = text;
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(proto + "://" + location.host + "/ws");
+
+  socket.addEventListener("open", () => setStatus(true, "live"));
+
+  socket.addEventListener("message", (ev) => {
+    const msg = JSON.parse(ev.data);
+    const firstNew = state.events.length;
+
+    if (msg.type === "snapshot") {
+      state.events = msg.events;
+      state.selected = null;
+      renderStats(msg.summary);
+      renderRows();
+      const idx = state.events.findIndex(isCaught);
+      if (idx !== -1) select(idx); else renderInspector();
+      return;
+    }
+
+    state.events.push(...msg.events);
+    renderStats(msg.summary);
+    renderRows(firstNew);
+    /* Follow the story: a newly disproven claim always takes the inspector,
+       because it is the only event that represents work the system did. */
+    const caughtIdx = msg.events.findIndex(isCaught);
+    if (caughtIdx !== -1) select(firstNew + caughtIdx);
+    else if (state.selected === null) renderInspector();
+    else renderInspector();
+  });
+
+  socket.addEventListener("close", () => {
+    setStatus(false, "reconnecting");
+    setTimeout(connect, 1200);
+  });
+  socket.addEventListener("error", () => socket.close());
+}
+
+for (const chip of document.querySelectorAll(".chip")) {
+  chip.addEventListener("click", () => {
+    state.filter = chip.dataset.filter;
+    for (const other of document.querySelectorAll(".chip")) {
+      other.setAttribute("aria-pressed", String(other === chip));
+    }
+    renderRows();
+  });
+}
+
+fetch("/api/events").then((r) => r.json()).then((d) => { $("logpath").textContent = d.log; }).catch(() => {});
+
+renderRows();
+renderInspector();
+connect();
+</script>
+</body>
+</html>

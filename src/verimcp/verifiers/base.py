@@ -10,6 +10,36 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+# The one place this string is written. Both enforcement shapes below build
+# on it and extract_failure_detail() reads it back off -- keeping producer
+# and parser in one module is deliberate: a parser living in proxy.py would
+# silently start returning None the day this wording changed, and the audit
+# log would quietly lose its diagnostics with every test still passing.
+FAILURE_PREFIX = "[verimcp] postcondition check failed: "
+
+
+def extract_failure_detail(response: dict[str, Any]) -> str | None:
+    """Recover the human-readable reason out of a response that `_override`
+    or `_error` produced, or None if this failure did not come from verimcp.
+
+    That None case matters and is not just defensive: a backend's own
+    `isError` response is a real failure too, but it is the backend
+    describing itself -- exactly the kind of self-report this whole project
+    declines to trust. Only a verimcp-authored message represents an
+    independently re-derived contradiction, so only that gets recorded as
+    verification evidence.
+    """
+    error = response.get("error")
+    if isinstance(error, dict):
+        message = error.get("message", "")
+        return message[len(FAILURE_PREFIX) :] if message.startswith(FAILURE_PREFIX) else None
+
+    for block in response.get("result", {}).get("content") or []:
+        text = block.get("text", "") if isinstance(block, dict) else ""
+        if text.startswith(FAILURE_PREFIX):
+            return text[len(FAILURE_PREFIX) :]
+    return None
+
 
 class Verifier(ABC):
     @abstractmethod
@@ -40,7 +70,7 @@ class Verifier(ABC):
         overridden = dict(response)
         overridden["result"] = {
             "isError": True,
-            "content": [{"type": "text", "text": f"[verimcp] postcondition check failed: {message}"}],
+            "content": [{"type": "text", "text": f"{FAILURE_PREFIX}{message}"}],
         }
         return overridden
 
@@ -54,5 +84,5 @@ class Verifier(ABC):
         return {
             "jsonrpc": response.get("jsonrpc", "2.0"),
             "id": response.get("id"),
-            "error": {"code": -32001, "message": f"[verimcp] postcondition check failed: {message}"},
+            "error": {"code": -32001, "message": f"{FAILURE_PREFIX}{message}"},
         }
