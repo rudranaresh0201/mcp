@@ -1,0 +1,23 @@
+# Public demo of the verimcp console.
+#
+# Serves a recording, not a live session: the log in deploy/ was produced by
+# scripts/demo_audit_log.py driving the real proxy in front of the real devmcp
+# server and the adversarial fixture, so every event on screen came from the
+# code path a real run uses. --replay walks it at a fixed cadence, and the UI
+# labels itself "replay" rather than "live" so the demo never overclaims.
+services:
+  - type: web
+    name: verimcp-console
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -e ".[dashboard]"
+    startCommand: >-
+      verimcp-dashboard
+      --audit-log deploy/console-demo.jsonl
+      --replay 0.7
+      --host 0.0.0.0
+      --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
