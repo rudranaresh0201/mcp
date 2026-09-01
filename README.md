@@ -9,6 +9,8 @@
 
 Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/?search=rudranaresh0201) as `io.github.rudranaresh0201/verimcp` and `io.github.rudranaresh0201/devmcp`.
 
+**[Watch the console →](https://verimcp-console.onrender.com)** — a recorded session replaying in the browser: three verified calls, five caught lies, one honest backend error.
+
 ## Problem
 
 MCP tool calls are trusted by default, in two different ways that both bite in production agent workflows:
@@ -44,11 +46,11 @@ python scripts/benchmark_retry_duplication.py   # does --idempotent-replay stop 
 **Claim-acceptance** — a real MCP Host with no verification layer accepts 100% of fabricated results by construction; that's not a benchmark artifact, it's the actual gap in the protocol:
 
 ```
-RAW claim-acceptance rate:     12/12  (100%)
-verimcp claim-catch rate:       9/12  (75%)
+RAW claim-acceptance rate:     14/14  (100%)
+verimcp claim-catch rate:      11/14  (79%)
 ```
 
-The 75%, not 100%, is deliberate and stated in the script's own output: 3 of the 12 scenarios exploit documented, principled gaps in specific verifiers (e.g. a hash-exists check can't tell *this* call created the hash vs an old one) — named plainly rather than hidden, because a tool claiming a perfect score on its own benchmark is the real red flag.
+The 79%, not 100%, is deliberate and stated in the script's own output: 3 of the 14 scenarios exploit documented, principled gaps in specific verifiers (e.g. a hash-exists check can't tell *this* call created the hash vs an old one) — named plainly rather than hidden, because a tool claiming a perfect score on its own benchmark is the real red flag.
 
 **Retry-duplication** — same idea applied to `--idempotent-replay`, against 5 realistic non-idempotent side effects (a counter bump, a notification send, an invoice increment, an audit entry, a two-step pipeline):
 
@@ -141,6 +143,22 @@ verimcp --otel-exporter otlp --otel-endpoint localhost:4317 -- devmcp --repo-pat
 ```
 
 Omitting `--otel-exporter` entirely means zero telemetry overhead — the default, same as every other opt-in flag here.
+
+## Watch it catch a lie
+
+The console reads the audit log verimcp already writes and streams it to a browser — verdict, tool, arguments, and the evidence each verdict rests on.
+
+**[verimcp-console.onrender.com](https://verimcp-console.onrender.com)** replays a recorded session. It is a recording, not a live agent, and the UI says so: the log it serves was produced by `scripts/demo_audit_log.py` driving the real proxy in front of the real `devmcp` server and the adversarial fixture, so every event on screen came from the code path a real run uses. A dashboard screenshot of invented events would be exactly the kind of unearned claim this project exists to catch. (Free instance — the first load after an idle spell takes ~30s to wake.)
+
+Against your own session:
+
+```bash
+pip install "verimcp[dashboard]"
+verimcp --audit-log ./audit.jsonl -- devmcp --repo-path ./some-repo   # terminal 1
+verimcp-dashboard --audit-log ./audit.jsonl                           # terminal 2
+```
+
+The console never talks to the proxy directly. verimcp speaks MCP over stdio to exactly one Host, and a second reader on that pipe would corrupt the session, so the audit log is the supported out-of-band surface ([ADR 0004](docs/adr/0004-audit-log-as-mcp-resource-and-policy-replay.md)) — reading a file cannot perturb what it observes, which matters for a tool whose whole claim is that it does not interfere.
 
 ## Try verify-before-retry yourself
 
