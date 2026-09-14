@@ -27,6 +27,22 @@ def _commit_exists(repo_root: Path, commit_hash: str) -> bool:
     return result.returncode == 0
 
 
+def commit_details(repo_root: Path, commit_hash: str) -> dict[str, str]:
+    """What a receipt shows for a commit that exists: read from git's own
+    object store, never from the tool response."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "log", "-1", "--format=%H%x00%s%x00%an%x00%cI", commit_hash],
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,  # same Windows deadlock guard as above
+        check=False,
+    )
+    parts = result.stdout.strip().split("\x00")
+    if result.returncode != 0 or len(parts) != 4:
+        return {"commit": commit_hash}
+    return {"commit": parts[0], "message": parts[1], "author": parts[2], "committed_at": parts[3]}
+
+
 class GitCommitVerifier(Verifier):
     def applies_to(self, tool_name: str) -> bool:
         return tool_name in COMMIT_TOOLS
@@ -43,7 +59,16 @@ class GitCommitVerifier(Verifier):
         if root is None:
             return response  # can't check without knowing the repo -- don't guess, don't block
 
+        source = f"git cat-file -e / git log in {root}"
         if not _commit_exists(root, claimed_hash):
-            return self._override(response, f"claimed commit {claimed_hash!r} does not exist in this repo's history")
+            return self._receipt(
+                self._override(response, f"claimed commit {claimed_hash!r} does not exist in this repo's history"),
+                verdict="contradicted", summary=f"commit {claimed_hash[:12]} is not in this repo's history",
+                source=source, evidence={"commit": claimed_hash, "exists": False},
+            )
 
-        return response  # verified: the claimed hash is real, pass through unchanged
+        details = commit_details(root, claimed_hash)
+        summary = f"commit {claimed_hash[:12]} exists"
+        if "message" in details:
+            summary += f": {details['message']!r} by {details['author']}"
+        return self._receipt(response, verdict="verified", summary=summary, source=source, evidence=details)

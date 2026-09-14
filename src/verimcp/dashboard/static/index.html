@@ -542,6 +542,37 @@ function contradiction(e) {
   return diff;
 }
 
+/* A receipt is the proof behind a verdict: what the verifier actually read,
+   where it read it, and when. Shown for claims that held as well as ones
+   that didn't -- a bare "passed" asks the viewer to take verimcp's word. */
+function receiptBlock(r) {
+  const held = r.verdict === "verified";
+  const box = el("div", "diff");
+  const head = el("div", "diff-head");
+  head.append(el("span", null, "receipt  ·  " + (held ? "verified" : "contradicted") + "  ·  " + (r.verifier || "")));
+  head.append(el("span", null, r.checked_at || ""));
+  box.append(head);
+  box.append(diffLine(held ? "plus" : "minus", held ? "verimcp confirmed" : "verimcp found", r.summary || ""));
+  const facts = el("div", "diff-line plus");
+  facts.append(el("span", "sign", "·"));
+  const body = el("div", "body");
+  body.append(el("span", "who", "source"));
+  body.append(document.createTextNode(r.source || "—"));
+  const evidence = r.evidence || {};
+  if (typeof evidence.url === "string" && evidence.url.startsWith("https://")) {
+    const link = el("a", null, evidence.url);
+    link.href = evidence.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    body.append(el("br"));
+    body.append(link);
+  }
+  if (Object.keys(evidence).length) body.append(el("pre", null, JSON.stringify(evidence, null, 2)));
+  facts.append(body);
+  box.append(facts);
+  return box;
+}
+
 function renderInspector() {
   const pane = $("pane");
   pane.textContent = "";
@@ -560,6 +591,7 @@ function renderInspector() {
      thing in the panel below the fold on a 1080p screen -- method, target,
      session and a JSON argument dump all outranked it for no reason. */
   if (isCaught(e)) pane.append(contradiction(e));
+  for (const r of (e.verification && e.verification.receipts) || []) pane.append(receiptBlock(r));
 
   const dl = el("dl");
   dl.style.margin = "0";

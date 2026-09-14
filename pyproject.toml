@@ -1,6 +1,6 @@
 [project]
 name = "verimcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "A standalone MCP server that proxies real MCP backends and verifies tool-call postconditions before results reach the client"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -45,6 +45,7 @@ resource_read = "verimcp.verifiers.resource_read:ResourceReadVerifier"
 git_server_commit = "verimcp.verifiers.git_server_commit:GitServerCommitVerifier"
 sqlite = "verimcp.verifiers.sqlite:SQLiteVerifier"
 docker = "verimcp.verifiers.docker:DockerVerifier"
+github = "verimcp.verifiers.github:GitHubVerifier"
 
 [project.optional-dependencies]
 # Real span/metric export -- Console for local debugging, OTLP for pointing
@@ -63,6 +64,12 @@ otel = [
 dashboard = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
+    # The console streams events over a WebSocket, and plain uvicorn ships no
+    # WebSocket implementation -- without this, a fresh `pip install
+    # verimcp[dashboard]` serves the page but every live connection is
+    # refused ("No supported WebSocket library detected"). Found by a manual
+    # install into a clean venv; the dev environment had it transitively.
+    "websockets>=12",
 ]
 dev = [
     "pytest>=8.0",

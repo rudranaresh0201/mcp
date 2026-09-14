@@ -14,8 +14,10 @@ from pathlib import Path
 
 from verimcp import telemetry
 from verimcp.gates.tool_call_policy import ToolCallPolicyGate
+from verimcp.http_backend import headers_from_env, parse_headers
 from verimcp.proxy import Proxy
 from verimcp.replay import format_report, replay
+from verimcp.wrap import main as wrap_main
 
 
 def main() -> int:
@@ -27,6 +29,8 @@ def main() -> int:
     # command at all, so it's simplest as its own small parser.
     if len(sys.argv) > 1 and sys.argv[1] == "replay":
         return _replay_main(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] in ("wrap", "unwrap"):
+        return wrap_main(sys.argv[2:], sys.argv[1])
 
     parser = argparse.ArgumentParser(
         prog="verimcp",
@@ -115,6 +119,37 @@ def main() -> int:
         "localhost:4317, the standard local OTel Collector/Jaeger/Grafana Agent port).",
     )
     parser.add_argument(
+        "--backend-url",
+        default=None,
+        help="Front a remote MCP server over Streamable HTTP instead of launching a local one, e.g. "
+        "--backend-url https://api.githubcopilot.com/mcp/. Mutually exclusive with a backend command.",
+    )
+    parser.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        metavar="'NAME: VALUE'",
+        help="HTTP header to send to --backend-url (repeatable). ${VAR} is read from the environment at "
+        "startup, so a token never has to be written into a config file: "
+        "--header 'Authorization: Bearer ${GITHUB_PERSONAL_ACCESS_TOKEN}'",
+    )
+    parser.add_argument(
+        "--receipts",
+        action="store_true",
+        help="Append a receipt to every checked tool reply: what the verifier actually observed (a PR's real "
+        "title, a commit's real message, a file's real hash), where it looked, and when -- for claims that held "
+        "as well as ones that didn't. Receipts are written to --audit-log either way.",
+    )
+    parser.add_argument(
+        "--header-from-env",
+        action="append",
+        default=[],
+        metavar="NAME=ENV_VAR",
+        help="HTTP header whose whole value is read from an environment variable (repeatable), e.g. "
+        "--header-from-env Authorization=VERIMCP_HEADER_1. What `verimcp wrap` writes, so a secret lives in "
+        "the server's env block rather than in its command-line arguments.",
+    )
+    parser.add_argument(
         "backend_cmd",
         nargs=argparse.REMAINDER,
         help="Backend MCP server command to launch, e.g.: verimcp -- devmcp --repo-path ./myrepo",
@@ -124,8 +159,17 @@ def main() -> int:
     backend_cmd = args.backend_cmd
     if backend_cmd and backend_cmd[0] == "--":
         backend_cmd = backend_cmd[1:]
-    if not backend_cmd:
-        parser.error("no backend command given -- usage: verimcp -- <backend command...>")
+    if args.backend_url and backend_cmd:
+        parser.error("give either --backend-url or a backend command, not both")
+    if not backend_cmd and not args.backend_url:
+        parser.error("no backend given -- usage: verimcp -- <backend command...>  or  verimcp --backend-url <url>")
+    if (args.header or args.header_from_env) and not args.backend_url:
+        parser.error("--header only applies to --backend-url")
+    try:
+        backend_headers = parse_headers(args.header)
+        backend_headers.update(headers_from_env(args.header_from_env))
+    except ValueError as e:
+        parser.error(str(e))
 
     verifier_names = args.verifiers.split(",") if args.verifiers else None
     root_override = Path(args.root).resolve() if args.root else None
@@ -151,6 +195,9 @@ def main() -> int:
                 approval_timeout=args.approval_timeout,
                 audit_log=audit_log,
                 idempotent_replay=args.idempotent_replay,
+                backend_url=args.backend_url,
+                backend_headers=backend_headers,
+                receipts_in_reply=args.receipts,
             ).run()
         )
     finally:
