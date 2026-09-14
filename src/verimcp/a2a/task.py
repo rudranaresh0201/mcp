@@ -59,8 +59,7 @@ def normalize_state(raw: Any) -> str:
         return UNKNOWN
 
     name = raw.strip()
-    if name.startswith(_V1_PREFIX):
-        name = name[len(_V1_PREFIX):]
+    name = name.removeprefix(_V1_PREFIX)
     name = name.lower().replace("_", "-")
 
     # a couple of spellings that survive the transform in the wrong shape

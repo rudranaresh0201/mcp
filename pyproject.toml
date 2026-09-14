@@ -111,3 +111,8 @@ timeout = 30
 # inside the wheel or `verimcp-dashboard` serves a 404 after a pip install.
 [tool.setuptools.package-data]
 verimcp = ["dashboard/static/*.html"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately shell out (git init/commit, docker) to build real
+# fixtures inside async test functions; blocking there is the point, not a bug.
+"**/tests/**" = ["ASYNC221"]
