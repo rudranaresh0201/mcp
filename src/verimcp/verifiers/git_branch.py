@@ -41,13 +41,26 @@ class GitBranchVerifier(Verifier):
         if root is None:
             return response  # can't check without knowing the repo -- don't guess, don't block
 
+        source = f"git rev-parse refs/heads/{claimed_branch} in {root}"
         actual_hash = _branch_head(root, claimed_branch)
         if actual_hash is None:
-            return self._override(response, f"claimed branch {claimed_branch!r} does not exist in this repo")
+            return self._receipt(
+                self._override(response, f"claimed branch {claimed_branch!r} does not exist in this repo"),
+                verdict="contradicted", summary=f"branch {claimed_branch} does not exist", source=source,
+                evidence={"branch": claimed_branch, "exists": False},
+            )
         if actual_hash != claimed_hash:
-            return self._override(
-                response,
-                f"claimed branch {claimed_branch!r} points at {claimed_hash!r}, but it actually points at {actual_hash!r}",
+            return self._receipt(
+                self._override(
+                    response,
+                    f"claimed branch {claimed_branch!r} points at {claimed_hash!r}, but it actually points at {actual_hash!r}",
+                ),
+                verdict="contradicted",
+                summary=f"branch {claimed_branch} exists but points at {actual_hash[:12]}, not {claimed_hash[:12]}",
+                source=source, evidence={"branch": claimed_branch, "claimed_head": claimed_hash, "actual_head": actual_hash},
             )
 
-        return response  # verified: branch is real and points where claimed
+        return self._receipt(
+            response, verdict="verified", summary=f"branch {claimed_branch} exists and points at {actual_hash[:12]}",
+            source=source, evidence={"branch": claimed_branch, "head": actual_hash},
+        )

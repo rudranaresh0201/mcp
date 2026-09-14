@@ -64,6 +64,10 @@ verimcp duplicate-action rate:  0/5  (0%)
 ## Technical summary
 
 - **Correctness verifiers** — one per tool/resource with an independently-checkable postcondition: `write_file` (disk hash-compare), `git_commit`/`git_branch` (re-derived from real git state), `run_ci_pipeline` (self-consistency + re-execution of steps marked safe to re-run), plus resource reads (`repo://status`, `repo://log`, `repo://file/{path}`). New verifiers are a plugin system (`importlib.metadata.entry_points`, the same mechanism pytest/Black use) — see [`docs/writing-a-verifier.md`](docs/writing-a-verifier.md).
+- **GitHub** — `create_pull_request`, `issue_write` (create) and `create_branch` from GitHub's official MCP server are checked against GitHub's own REST API: the PR/issue/branch must exist *and* carry the title that was requested, which also catches a server handing back a real, older PR as if it were new. A 404 only counts once the repo is confirmed visible, so a private repo without a token is left unchecked rather than falsely flagged.
+- **Receipts** (`--receipts`, on by default under `wrap`) — every check records what it actually observed (a PR's real title and link, a commit's real message and author, a file's real hash), where it looked and when, for claims that held as well as ones that didn't. Written to the audit log and console always, appended to the tool reply with the flag.
+- **Remote servers** (`--backend-url`) — fronts a server over Streamable HTTP (MCP spec 2025-06-18: JSON and SSE replies, session ids, protocol-version header), with `--header 'Authorization: Bearer ${TOKEN}'` / `--header-from-env` so a secret never has to live in a config file or a command line. Checked against a hosted server (DeepWiki) as well as the test suite.
+- **Roots from the Host** — verimcp asks a roots-capable Host (Claude Code, Cursor) for its workspace itself, so filesystem and git verifiers work in front of servers that never ask, like `mcp-server-git`.
 - **Verify-before-retry** (`--idempotent-replay`) — a retried `tools/call` is only ever answered from cache if the *previous* identical call was independently verified true by the checks above; a key match with no prior verified success is a cache miss, not a false dedupe. Adapted from [arXiv:2608.02645](https://arxiv.org/abs/2608.02645), moved to the proxy layer so it works for any Host/backend pair verimcp fronts, not just one agent framework's own retry wrapper.
 - **Policy gates** — allow/deny/require-approval rules evaluated *before* a call reaches the backend, for the calls that have no objective truth to check (sampling rate limits, arbitrary tool-name/argument policy via YAML, human-in-the-loop approval over real MCP `elicitation/create`).
 - **Audit + replay** — every call verimcp handles is logged and served back as a real `verimcp://audit` MCP resource; `verimcp replay` re-runs recorded traffic against a new policy to backtest "would this have changed anything."
@@ -73,6 +77,26 @@ verimcp duplicate-action rate:  0/5  (0%)
 Deeper design reasoning (why prompts/roots get no verifier on principle, why policy is a separate concept from verification, etc.) lives in [`docs/adr/`](docs/adr/) for anyone who wants to go that deep — the summary above is everything needed to use or evaluate the project.
 
 ## Getting started
+
+**Fastest: protect the MCP servers you already have** (0.4.0, not yet on PyPI — install from GitHub until it is):
+
+```bash
+pip install "verimcp[dashboard] @ git+https://github.com/rudranaresh0201/mcp"
+verimcp wrap                 # puts verimcp in front of every server in Claude Code, Claude Desktop and Cursor
+verimcp-dashboard --audit-log ~/.verimcp/audit.jsonl   # watch every verdict live at http://127.0.0.1:8787
+```
+
+Restart your MCP app and keep using it in plain English. `wrap` backs up each config file first, skips servers it can't safely front (ones that sign in through the app's own OAuth flow, legacy SSE), never puts a header token into command-line arguments, and `verimcp unwrap` restores the originals exactly. `--dry-run` shows the plan without writing anything.
+
+What it looks like, from a real run through the official `mcp-server-git` and a deliberately lying file server:
+
+```
+[verimcp receipt] CONTRADICTED · FilesystemVerifier
+todo.txt does not exist on disk
+
+[verimcp receipt] VERIFIED · GitServerCommitVerifier
+commit b6fcbbd50b11 exists: 'Add hello file' by Rudra
+```
 
 **As a user** — install straight from PyPI:
 

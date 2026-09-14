@@ -1,6 +1,6 @@
 [project]
 name = "verimcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "A standalone MCP server that proxies real MCP backends and verifies tool-call postconditions before results reach the client"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -45,6 +45,7 @@ resource_read = "verimcp.verifiers.resource_read:ResourceReadVerifier"
 git_server_commit = "verimcp.verifiers.git_server_commit:GitServerCommitVerifier"
 sqlite = "verimcp.verifiers.sqlite:SQLiteVerifier"
 docker = "verimcp.verifiers.docker:DockerVerifier"
+github = "verimcp.verifiers.github:GitHubVerifier"
 
 [project.optional-dependencies]
 # Real span/metric export -- Console for local debugging, OTLP for pointing
@@ -63,6 +64,12 @@ otel = [
 dashboard = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
+    # The console streams events over a WebSocket, and plain uvicorn ships no
+    # WebSocket implementation -- without this, a fresh `pip install
+    # verimcp[dashboard]` serves the page but every live connection is
+    # refused ("No supported WebSocket library detected"). Found by a manual
+    # install into a clean venv; the dev environment had it transitively.
+    "websockets>=12",
 ]
 dev = [
     "pytest>=8.0",
@@ -99,8 +106,18 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 timeout = 30
+# Tests import shared fixtures as `tests.fixtures...` / `tests.test_...`.
+# `python -m pytest` puts the repo root on sys.path implicitly, but CI runs
+# plain `pytest tests`, which doesn't -- without this, those imports fail at
+# collection there and nowhere else.
+pythonpath = ["."]
 
 # index.html is the console itself, not a build artifact -- it must ship
 # inside the wheel or `verimcp-dashboard` serves a 404 after a pip install.
 [tool.setuptools.package-data]
 verimcp = ["dashboard/static/*.html"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately shell out (git init/commit, docker) to build real
+# fixtures inside async test functions; blocking there is the point, not a bug.
+"**/tests/**" = ["ASYNC221"]

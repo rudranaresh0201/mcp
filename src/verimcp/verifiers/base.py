@@ -7,8 +7,20 @@ checks this - `isError: false` only means the tool ran without raising an
 error, not that its claimed effect is real.
 """
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+# Receipts ride along on the response dict under this private key while the
+# verifier chain runs, and Proxy pops them off before anything is forwarded,
+# so the key never appears in a real JSON-RPC message. Kept on the response
+# (rather than a return value) so the verify() signature every third-party
+# verifier already implements does not change.
+RECEIPTS_KEY = "__verimcp_receipts__"
+
+
+def pop_receipts(message: dict[str, Any]) -> list[dict[str, Any]]:
+    return message.pop(RECEIPTS_KEY, None) or []
 
 # The one place this string is written. Both enforcement shapes below build
 # on it and extract_failure_detail() reads it back off -- keeping producer
@@ -60,6 +72,26 @@ class Verifier(ABC):
         backend's paths, not verimcp's own cwd, so a verifier that touches
         the filesystem must resolve against this, not against Path.cwd().
         """
+
+    def _receipt(
+        self, response: dict[str, Any], *, verdict: str, summary: str, source: str, evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Attach proof of what this verifier actually observed -- for a claim
+        that held ("verified") as much as for one that didn't ("contradicted").
+        A bare pass/fail asks the reader to trust the verifier; a receipt
+        shows the facts it read, where it read them, and when.
+
+        Returns `response` so a verifier can write
+        `return self._receipt(self._override(...), ...)`."""
+        response.setdefault(RECEIPTS_KEY, []).append({
+            "verifier": type(self).__name__,
+            "verdict": verdict,
+            "summary": summary,
+            "source": source,
+            "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "evidence": evidence,
+        })
+        return response
 
     @staticmethod
     def _override(response: dict[str, Any], message: str) -> dict[str, Any]:

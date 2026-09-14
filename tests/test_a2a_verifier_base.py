@@ -9,7 +9,11 @@ them together.
 from typing import Any
 
 from verimcp.a2a.task import COMPLETED, FAILED, claims_success, state_of
-from verimcp.a2a.verifiers.base import FAILURE_PREFIX, TaskVerifier, extract_failure_detail
+from verimcp.a2a.verifiers.base import (
+    FAILURE_PREFIX,
+    TaskVerifier,
+    extract_failure_detail,
+)
 
 
 class _Stub(TaskVerifier):

@@ -6,6 +6,42 @@ lockstep since they've evolved together, despite having no import
 dependency on each other -- except when a release only changes one of the
 two (like 0.2.2 below), in which case only that package's version moves.
 
+## [0.4.0] — verimcp only, unreleased on PyPI
+
+### Added
+
+- **`verimcp wrap` / `verimcp unwrap`**: one command puts verimcp in front
+  of every MCP server configured in Claude Code (user scope and every
+  project), Claude Desktop and Cursor. Backs up each file, writes
+  atomically, records originals in `~/.verimcp/wrap-state.json` so unwrap
+  restores them exactly (and leaves entries edited since untouched). Skips
+  already-wrapped servers, remote servers with no headers (likely app
+  OAuth; `--all-http` overrides) and legacy SSE. Header values move into
+  the entry's env block, never its arguments. `--dry-run`, `--launcher`.
+- **`GitHubVerifier`**: checks `create_pull_request`, `issue_write`
+  (create) and `create_branch` claims from github/github-mcp-server against
+  GitHub's REST API, including title match (catches a reused real PR) and
+  a visibility check before treating a 404 as a lie. Token optional.
+- **Receipts**: verifiers record what they observed (verdict, summary,
+  source, time, evidence) for passes and catches alike; always in the audit
+  log and console Inspector, appended to the reply with `--receipts`.
+- **Streamable HTTP backends**: `--backend-url`, `--header` (with `${ENV}`
+  expansion) and `--header-from-env`. Ordered sends, concurrent replies,
+  JSON and SSE, session id and protocol-version headers, DELETE on exit.
+- **Host roots**: verimcp requests `roots/list` from a roots-capable Host
+  itself, so verifiers get a root in front of backends that never ask.
+
+### Fixed
+
+- The `dashboard` extra now installs `websockets`; a clean
+  `pip install verimcp[dashboard]` previously served the console page but
+  refused every live connection. Found by installing the built wheel into
+  an empty venv.
+- The proxy now waits for the backend subprocess to exit before returning,
+  instead of leaving its transport to the garbage collector after the loop
+  closed -- which on Windows printed "The handle is invalid" tracebacks to
+  stderr and made two telemetry tests flaky.
+
 ## [0.3.0]
 
 ### Added

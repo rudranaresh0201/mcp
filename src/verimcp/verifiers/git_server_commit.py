@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from verimcp.verifiers.base import Verifier
+from verimcp.verifiers.git_commit import commit_details
 
 COMMIT_TOOLS = {"git_commit"}
 _HASH_RE = re.compile(r"\bwith hash ([0-9a-f]{40})\b")
@@ -55,7 +56,16 @@ class GitServerCommitVerifier(Verifier):
         if root is None:
             return response  # can't check without knowing the repo -- don't guess, don't block
 
+        source = f"git cat-file -e / git log in {root}"
         if not _commit_exists(root, claimed_hash):
-            return self._override(response, f"claimed commit {claimed_hash!r} does not exist in this repo's history")
+            return self._receipt(
+                self._override(response, f"claimed commit {claimed_hash!r} does not exist in this repo's history"),
+                verdict="contradicted", summary=f"commit {claimed_hash[:12]} is not in this repo's history",
+                source=source, evidence={"commit": claimed_hash, "exists": False},
+            )
 
-        return response  # verified: the claimed hash is real, pass through unchanged
+        details = commit_details(root, claimed_hash)
+        summary = f"commit {claimed_hash[:12]} exists"
+        if "message" in details:
+            summary += f": {details['message']!r} by {details['author']}"
+        return self._receipt(response, verdict="verified", summary=summary, source=source, evidence=details)

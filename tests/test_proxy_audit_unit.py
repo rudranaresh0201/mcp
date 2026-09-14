@@ -5,9 +5,9 @@ in test_proxy_integration.py, since devmcp itself always answers
 resources/list successfully."""
 from pathlib import Path
 
+from tests.test_verifiers_base import _StubVerifier
 from verimcp import audit_resource
 from verimcp.proxy import Proxy
-from tests.test_verifiers_base import _StubVerifier
 
 
 def _proxy(tmp_path: Path) -> Proxy:

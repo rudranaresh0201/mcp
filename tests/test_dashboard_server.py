@@ -18,9 +18,9 @@ import pytest
 
 pytest.importorskip("fastapi", reason="dashboard extra not installed")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from verimcp.dashboard.server import create_app  # noqa: E402
+from verimcp.dashboard.server import create_app
 
 
 def _event(seq: int, outcome: str = "verified_ok", **verification) -> dict:
@@ -66,9 +66,8 @@ def test_websocket_opens_and_sends_a_snapshot(tmp_path: Path):
     log = tmp_path / "audit.jsonl"
     _write(log, _event(1, "verified_ok", verifiers=["GitCommitVerifier"], passed=True))
 
-    with TestClient(create_app(log)) as client:
-        with client.websocket_connect("/ws") as socket:
-            frame = socket.receive_json()
+    with TestClient(create_app(log)) as client, client.websocket_connect("/ws") as socket:
+        frame = socket.receive_json()
 
     assert frame["type"] == "snapshot"
     assert len(frame["events"]) == 1
@@ -81,11 +80,10 @@ def test_websocket_follows_appends_written_after_connect(tmp_path: Path):
     log = tmp_path / "audit.jsonl"
     _write(log, _event(1, "verified_ok", verifiers=["GitCommitVerifier"], passed=True))
 
-    with TestClient(create_app(log)) as client:
-        with client.websocket_connect("/ws") as socket:
-            assert socket.receive_json()["type"] == "snapshot"
-            _write(log, _event(2, "verified_failed", verifiers=["GitCommitVerifier"], passed=False, detail="fabricated"))
-            appended = socket.receive_json()
+    with TestClient(create_app(log)) as client, client.websocket_connect("/ws") as socket:
+        assert socket.receive_json()["type"] == "snapshot"
+        _write(log, _event(2, "verified_failed", verifiers=["GitCommitVerifier"], passed=False, detail="fabricated"))
+        appended = socket.receive_json()
 
     assert appended["type"] == "append"
     assert appended["events"][0]["seq"] == 2
@@ -102,11 +100,10 @@ def test_replay_starts_empty_and_fills(tmp_path: Path):
            _event(1, "verified_ok", verifiers=["GitCommitVerifier"], passed=True),
            _event(2, "verified_failed", verifiers=["GitCommitVerifier"], passed=False, detail="fabricated"))
 
-    with TestClient(create_app(log, replay_delay=0.0)) as client:
-        with client.websocket_connect("/ws") as socket:
-            snapshot = socket.receive_json()
-            first = socket.receive_json()
-            second = socket.receive_json()
+    with TestClient(create_app(log, replay_delay=0.0)) as client, client.websocket_connect("/ws") as socket:
+        snapshot = socket.receive_json()
+        first = socket.receive_json()
+        second = socket.receive_json()
 
     assert snapshot["type"] == "snapshot" and snapshot["events"] == []
     assert first["events"][0]["seq"] == 1
@@ -121,10 +118,9 @@ def test_replay_holds_the_connection_after_the_last_event(tmp_path: Path):
     log = tmp_path / "audit.jsonl"
     _write(log, _event(1, "verified_failed", verifiers=["GitCommitVerifier"], passed=False, detail="fabricated"))
 
-    with TestClient(create_app(log, replay_delay=0.0)) as client:
-        with client.websocket_connect("/ws") as socket:
-            socket.receive_json()  # snapshot
-            socket.receive_json()  # the one event
-            # Still open: exiting the context is a clean client-side close,
-            # not a server-side disconnect. A closed socket would raise here.
-            assert socket is not None
+    with TestClient(create_app(log, replay_delay=0.0)) as client, client.websocket_connect("/ws") as socket:
+        socket.receive_json()  # snapshot
+        socket.receive_json()  # the one event
+        # Still open: exiting the context is a clean client-side close,
+        # not a server-side disconnect. A closed socket would raise here.
+        assert socket is not None

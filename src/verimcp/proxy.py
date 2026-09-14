@@ -21,11 +21,14 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 from verimcp import audit_resource, idempotency, jsonrpc, telemetry
+from verimcp import receipts as receipts_module
 from verimcp.audit import AuditStore
 from verimcp.gates.base import RequestGate
 from verimcp.gates.sampling_rate_limit import SamplingRateLimitGate
 from verimcp.gates.tool_call_policy import ToolCallPolicyGate
-from verimcp.verifiers import base as verifier_base, registry
+from verimcp.http_backend import HttpBackend
+from verimcp.verifiers import base as verifier_base
+from verimcp.verifiers import registry
 from verimcp.verifiers.schema_conformance import SchemaConformanceVerifier
 
 FILE_URI_PREFIX = "file://"
@@ -37,8 +40,15 @@ FILE_URI_PREFIX = "file://"
 _ELICITATION_ID_PREFIX = "verimcp-elicit-"
 
 
+_ROOTS_ID_PREFIX = "verimcp-roots-"
+
+
 def _is_elicitation_id(id_) -> bool:
     return isinstance(id_, str) and id_.startswith(_ELICITATION_ID_PREFIX)
+
+
+def _is_own_roots_id(id_) -> bool:
+    return isinstance(id_, str) and id_.startswith(_ROOTS_ID_PREFIX)
 
 
 def _extract_root(roots_list_response: dict) -> Path | None:
@@ -78,8 +88,18 @@ class Proxy:
         approval_timeout: float = 60.0,
         audit_log: Path | None = None,
         idempotent_replay: bool = False,
+        backend_url: str | None = None,
+        backend_headers: dict[str, str] | None = None,
+        receipts_in_reply: bool = False,
     ):
         self.backend_cmd = backend_cmd
+        # Opt-in via --receipts: append each check's receipt to the tool
+        # reply itself. Receipts reach the audit log either way.
+        self._receipts_in_reply = receipts_in_reply
+        # A remote backend over Streamable HTTP instead of a local subprocess
+        # (see http_backend.py). Mutually exclusive with backend_cmd.
+        self.backend_url = backend_url
+        self.backend_headers = backend_headers or {}
         # None loads every verifier installed under the verimcp.verifiers
         # entry-point group (existing behavior, unchanged for old callers).
         # An explicit list restricts to just those -- needed once more than
@@ -113,6 +133,11 @@ class Proxy:
         # for exactly that case: a verifier still needs to know the backend's
         # real working directory even when the backend never tells the Host.
         self._root: Path | None = root_override
+        self._root_override = root_override
+        # Whether the Host can answer roots/list itself (declared in its
+        # initialize capabilities) -- see _request_roots_from_host.
+        self._host_supports_roots = False
+        self._next_roots_id = itertools.count(1)
         # Policy gates -- unlike verifiers, these check *requests* before
         # forwarding them at all, in either direction (sampling/createMessage
         # backend->Host, tools/call Host->backend), not responses. See
@@ -185,11 +210,16 @@ class Proxy:
         self._idempotency = idempotency.IdempotencyCache() if idempotent_replay else None
 
     async def run(self) -> None:
-        backend = await asyncio.create_subprocess_exec(
-            *self.backend_cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-        )
+        if self.backend_url is not None:
+            # Same stdin/stdout shape as the subprocess below, so nothing
+            # after this line knows or cares which transport it is.
+            backend = await HttpBackend(self.backend_url, self.backend_headers).start()
+        else:
+            backend = await asyncio.create_subprocess_exec(
+                *self.backend_cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+            )
 
         try:
             await asyncio.gather(
@@ -207,6 +237,25 @@ class Proxy:
             for span, _ in self._active_spans.values():
                 telemetry.abandon_span(span)
             self._active_spans.clear()
+            if isinstance(backend, asyncio.subprocess.Process):
+                await self._reap(backend)
+
+    @staticmethod
+    async def _reap(backend: asyncio.subprocess.Process) -> None:
+        """Wait for the backend to exit while the event loop is still alive.
+        Returning without this leaves the subprocess transport to be closed
+        by the garbage collector after asyncio.run() has torn the loop down,
+        which on Windows fails on an already-invalid handle and prints an
+        'Exception ignored ... The handle is invalid' traceback to stderr --
+        noise on a channel that must stay silent unless asked (see
+        test_no_otel_exporter_flag_means_nothing_on_stderr)."""
+        if backend.returncode is not None:
+            return
+        try:
+            await asyncio.wait_for(backend.wait(), timeout=5)
+        except TimeoutError:
+            backend.kill()
+            await backend.wait()
 
     async def _forward_host_to_backend(self, backend) -> None:
         reader = _StdinReader()
@@ -220,6 +269,7 @@ class Proxy:
             if message.get("method") == "initialize":
                 capabilities = message.get("params", {}).get("capabilities", {})
                 self._host_supports_elicitation = "elicitation" in capabilities
+                self._host_supports_roots = "roots" in capabilities
                 if self._audit is not None and "id" in message:
                     self._pending_initialize.add(message["id"])
 
@@ -254,6 +304,15 @@ class Proxy:
                 future = self._pending_elicitations.pop(message["id"], None)
                 if future is not None and not future.done():
                     future.set_result(message)
+                continue
+
+            if _is_own_roots_id(message.get("id")) and ("result" in message or "error" in message):
+                # The Host's answer to verimcp's own roots/list -- swallowed
+                # for the same reason as an elicitation reply above. An
+                # explicit --root always wins; a root the backend negotiated
+                # itself (devmcp) is the same Host answer, so either is fine.
+                if "result" in message and self._root_override is None:
+                    self._root = _extract_root(message) or self._root
                 continue
 
             if message.get("method") in ("tools/call", "resources/read") and "id" in message:
@@ -329,6 +388,23 @@ class Proxy:
             jsonrpc.write_message(backend.stdin, message)
             await backend.stdin.drain()
 
+            if message.get("method") in ("notifications/initialized", "notifications/roots/list_changed"):
+                self._request_roots_from_host()
+
+    def _request_roots_from_host(self) -> None:
+        """Ask the Host for its roots directly, instead of only overhearing a
+        backend that asks. Many real servers never send roots/list at all --
+        the reference mcp-server-git takes --repository, filesystem servers
+        take directory arguments -- which used to leave every filesystem- and
+        git-backed verifier with no root, so each call passed through
+        unchecked. The Host (Claude Code, Cursor) knows the workspace; asking
+        it costs one message. Skipped when the Host didn't declare the roots
+        capability, or when --root already pins the answer."""
+        if not self._host_supports_roots or self._root_override is not None:
+            return
+        request_id = f"{_ROOTS_ID_PREFIX}{next(self._next_roots_id)}"
+        jsonrpc.write_message_sync({"jsonrpc": "2.0", "id": request_id, "method": "roots/list"})
+
     async def _forward_backend_to_host(self, backend) -> None:
         while True:
             message = await jsonrpc.read_message(backend.stdout)
@@ -392,7 +468,10 @@ class Proxy:
                 verifiers_run = registry.verifiers_for(identifier, self._verifiers)
                 for verifier in verifiers_run:
                     message = verifier.verify(request, message, root=self._root)
-                self._record_completed_audit(request, message, verifiers_run)
+                # Popped before anything else touches the message, so the
+                # private key can never reach the Host or the retry cache.
+                receipts = verifier_base.pop_receipts(message)
+                receipts = self._record_completed_audit(request, message, verifiers_run, receipts)
 
                 if (
                     self._idempotency is not None
@@ -410,6 +489,9 @@ class Proxy:
                     # can't be inferred from an API call alone.
                     key = idempotency.compute_key(params.get("name", ""), params.get("arguments"))
                     self._idempotency.record_verified_ok(key, message)
+
+                if self._receipts_in_reply and request.get("method") == "tools/call":
+                    message = receipts_module.attach_to_reply(message, receipts)
 
             jsonrpc.write_message_sync(message)
 
@@ -485,7 +567,9 @@ class Proxy:
         )
         self._notify_audit_subscribers()
 
-    def _record_completed_audit(self, request: dict, response: dict, verifiers_run: list) -> None:
+    def _record_completed_audit(
+        self, request: dict, response: dict, verifiers_run: list, receipts: list | None = None
+    ) -> list:
         """Records a tools/call or resources/read that actually reached the
         backend and got a response -- as opposed to one denied before ever
         being forwarded, which _record_audit's other call sites handle
@@ -495,10 +579,15 @@ class Proxy:
         both handled inside _record_audit) -- the _pending_approval_meta
         pop below also needs to happen regardless of --audit-log, or a
         require_approval-accepted call's side-table entry would never be
-        cleaned up when audit logging is off."""
+        cleaned up when audit logging is off.
+
+        Returns the receipts that were recorded -- the verifiers' own, or a
+        minimal fallback for a verifier that keeps none -- so the reply can
+        carry exactly what the audit log says."""
         meta = self._pending_approval_meta.pop(request.get("id"), {})
         gate = meta.get("gate")
         approval = meta.get("approval")
+        receipts = list(receipts or [])
 
         if not verifiers_run:
             outcome = "forwarded"
@@ -531,11 +620,19 @@ class Proxy:
                 # to anything filtering on it.
                 outcome, passed = "backend_error", None
 
-            verification = {"verifiers": [type(v).__name__ for v in verifiers_run], "passed": passed}
+            verifier_names = [type(v).__name__ for v in verifiers_run]
+            verification = {"verifiers": verifier_names, "passed": passed}
             if detail is not None:
                 verification["detail"] = detail
+            if passed is None:
+                receipts = []  # the backend admitted failure: no claim was checked, so no receipt
+            elif not receipts:
+                receipts = receipts_module.fallback(verifier_names, passed, detail)
+            if receipts:
+                verification["receipts"] = receipts
 
         self._record_audit(request, outcome=outcome, gate=gate, verification=verification, approval=approval)
+        return receipts
 
     def _notify_audit_subscribers(self) -> None:
         for uri in (audit_resource.AUDIT_URI, audit_resource.CURRENT_SESSION_URI):
