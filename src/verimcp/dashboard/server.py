@@ -123,8 +123,9 @@ async def _replay(socket, audit_log: Path, delay: float) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verimcp-dashboard", description=__doc__)
-    parser.add_argument("--audit-log", type=Path, default=Path("verimcp-audit.jsonl"),
-                        help="the log verimcp was started with (--audit-log)")
+    parser.add_argument("--audit-log", type=Path, default=None,
+                        help="the log verimcp was started with (--audit-log); "
+                             "default: the one `verimcp wrap` sets up, ~/.verimcp/audit.jsonl")
     parser.add_argument("--host", default="127.0.0.1",
                         help="bind address; stays on loopback by default because an audit log "
                              "contains real tool arguments and should not be served to a network "
@@ -139,8 +140,13 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError:
         parser.error("the dashboard extra is not installed -- run: pip install 'verimcp[dashboard]'")
 
+    from verimcp.audit import default_log_path
+
+    args.audit_log = args.audit_log or default_log_path()
     print(f"verimcp console  ->  http://{args.host}:{args.port}")
     print(f"reading          ->  {args.audit_log}")
+    if not args.audit_log.exists():
+        print("                     (no verdicts yet -- they appear once a wrapped server handles a tool call)")
     if args.replay is not None:
         print(f"replay mode      ->  {args.replay}s per event")
     uvicorn.run(create_app(args.audit_log, replay_delay=args.replay), host=args.host, port=args.port, log_level="warning")

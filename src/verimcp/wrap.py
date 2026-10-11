@@ -44,6 +44,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from verimcp.audit import default_log_path
+
 MARKER_ARG = "--audit-log"
 
 
@@ -319,8 +321,11 @@ def format_plan(plan: Plan, verb: str, dry_run: bool, audit_log: Path | None) ->
         for backup in plan.backups:
             lines.append(f"Backup: {backup}")
         if done and verb == "wrapped":
-            lines.append("Restart your MCP apps so they relaunch the servers through verimcp.")
-            lines.append(f"Watch every verdict live:  verimcp-dashboard --audit-log {audit_log}")
+            lines.append("Quit and reopen your MCP apps so they relaunch the servers through verimcp.")
+            lines.append("  An app left open while this ran can save its old config back over this change;")
+            lines.append("  after reopening, `verimcp wrap --dry-run` should report every server as already wrapped.")
+            watch = "verimcp-dashboard" + ("" if audit_log == default_log_path() else f" --audit-log {audit_log}")
+            lines.append(f"Watch every verdict live:  {watch}")
             lines.append("Undo at any time:          verimcp unwrap")
         elif done:
             lines.append("Restart your MCP apps to pick up the original servers.")
@@ -347,7 +352,7 @@ def main(argv: list[str], command: str) -> int:
 
     home = Path(args.home).expanduser().resolve() if args.home else Path.home()
     if command == "wrap":
-        audit_log = Path(args.audit_log).expanduser().resolve() if args.audit_log else home / ".verimcp" / "audit.jsonl"
+        audit_log = Path(args.audit_log).expanduser().resolve() if args.audit_log else default_log_path(home)
         if not args.dry_run:
             audit_log.parent.mkdir(parents=True, exist_ok=True)
         plan = wrap(home, audit_log, args.launcher, args.all_http, args.dry_run, home_overridden=args.home is not None)

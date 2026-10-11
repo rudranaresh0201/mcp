@@ -19,6 +19,15 @@ from pathlib import Path
 from typing import Any
 
 
+def default_log_path(home: Path | None = None) -> Path:
+    """Where `verimcp wrap` points every wrapped server's --audit-log, and so
+    where `verimcp-dashboard` looks when it is not told otherwise. Defined once
+    so the two cannot drift: the console used to default to a relative
+    `verimcp-audit.jsonl` in whatever directory it was started from, and a user
+    who wrapped and then ran `verimcp-dashboard` watched a file nothing wrote to."""
+    return (home or Path.home()) / ".verimcp" / "audit.jsonl"
+
+
 class AuditStore:
     def __init__(self, path: Path, session_id: str | None = None) -> None:
         self.path = path
