@@ -32,6 +32,10 @@ def main() -> int:
         return _replay_main(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] in ("wrap", "unwrap"):
         return wrap_main(sys.argv[2:], sys.argv[1])
+    if len(sys.argv) > 1 and sys.argv[1] == "probe":
+        from verimcp.probe import main as probe_main
+
+        return probe_main(sys.argv[2:])
 
     parser = argparse.ArgumentParser(
         prog="verimcp",
