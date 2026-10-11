@@ -31,7 +31,7 @@ import fnmatch
 from pathlib import Path
 from typing import Any
 
-import yaml
+from verimcp.gates.policy_file import load_policy_file
 
 
 class ToolVisibility:
@@ -41,7 +41,7 @@ class ToolVisibility:
 
     @classmethod
     def from_yaml(cls, path: Path, role: str) -> "ToolVisibility":
-        roles = (yaml.safe_load(path.read_text()) or {}).get("roles") or {}
+        roles = load_policy_file(path).get("roles") or {}
         if role not in roles:
             # Fail at startup, not open: a typo in --role must not quietly
             # turn into "sees everything".

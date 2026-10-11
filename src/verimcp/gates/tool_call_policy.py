@@ -14,9 +14,8 @@ import fnmatch
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from verimcp.gates.base import RequestGate
+from verimcp.gates.policy_file import load_policy_file
 
 _VALID_ACTIONS = {"allow", "deny", "require_approval"}
 
@@ -27,7 +26,7 @@ class ToolCallPolicyGate(RequestGate):
 
     @classmethod
     def from_yaml(cls, path: Path) -> "ToolCallPolicyGate":
-        data = yaml.safe_load(path.read_text()) or {}
+        data = load_policy_file(path)
         rules = data.get("rules") or []
         for rule in rules:
             if rule.get("action") not in _VALID_ACTIONS:

@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from verimcp import telemetry
+from verimcp.gates.policy_file import PolicyFileError
 from verimcp.gates.tool_call_policy import ToolCallPolicyGate
 from verimcp.http_backend import headers_from_env, parse_headers
 from verimcp.proxy import Proxy
@@ -195,23 +196,27 @@ def main() -> int:
         parser.error(str(e))
 
     try:
-        asyncio.run(
-            Proxy(
-                backend_cmd,
-                verifier_names=verifier_names,
-                root_override=root_override,
-                sampling_limit=args.sampling_limit,
-                sampling_window=args.sampling_window,
-                policy_config=policy_config,
-                approval_timeout=args.approval_timeout,
-                audit_log=audit_log,
-                idempotent_replay=args.idempotent_replay,
-                backend_url=args.backend_url,
-                backend_headers=backend_headers,
-                receipts_in_reply=args.receipts,
-                role=args.role,
-            ).run()
+        proxy = Proxy(
+            backend_cmd,
+            verifier_names=verifier_names,
+            root_override=root_override,
+            sampling_limit=args.sampling_limit,
+            sampling_window=args.sampling_window,
+            policy_config=policy_config,
+            approval_timeout=args.approval_timeout,
+            audit_log=audit_log,
+            idempotent_replay=args.idempotent_replay,
+            backend_url=args.backend_url,
+            backend_headers=backend_headers,
+            receipts_in_reply=args.receipts,
+            role=args.role,
         )
+    except PolicyFileError as e:
+        # Refuse to start rather than run with a policy that may be empty.
+        parser.error(str(e))
+
+    try:
+        asyncio.run(proxy.run())
     finally:
         # Flush any spans/metrics from the run's final calls before exit --
         # no-op if --otel-exporter was never given.
@@ -245,7 +250,10 @@ def _replay_main(argv: list[str]) -> int:
     if args.session is not None:
         entries = [e for e in entries if e.get("session_id") == args.session]
 
-    policy_gate = ToolCallPolicyGate.from_yaml(Path(args.policy_config).resolve())
+    try:
+        policy_gate = ToolCallPolicyGate.from_yaml(Path(args.policy_config).resolve())
+    except PolicyFileError as e:
+        parser.error(str(e))
     diffs = replay(entries, policy_gate)
     print(format_report(diffs))
     return 0
