@@ -75,6 +75,14 @@ def main() -> int:
         "reaches the backend. Omit for no tools/call policy gating at all (existing behavior).",
     )
     parser.add_argument(
+        "--role",
+        default=None,
+        help="Who this proxy is serving, e.g. --role intern. The role's `tools:` patterns under `roles:` in "
+        "--policy-config decide which tools appear in tools/list at all; every other tool is hidden from the "
+        "Host and refused as unknown if called. Fixed at launch, never read from a request. Omit to list "
+        "every tool (existing behavior).",
+    )
+    parser.add_argument(
         "--approval-timeout",
         type=float,
         default=60.0,
@@ -171,6 +179,9 @@ def main() -> int:
     except ValueError as e:
         parser.error(str(e))
 
+    if args.role and not args.policy_config:
+        parser.error("--role needs --policy-config (the file that defines the roles)")
+
     verifier_names = args.verifiers.split(",") if args.verifiers else None
     root_override = Path(args.root).resolve() if args.root else None
     policy_config = Path(args.policy_config).resolve() if args.policy_config else None
@@ -198,6 +209,7 @@ def main() -> int:
                 backend_url=args.backend_url,
                 backend_headers=backend_headers,
                 receipts_in_reply=args.receipts,
+                role=args.role,
             ).run()
         )
     finally:

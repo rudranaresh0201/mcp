@@ -20,12 +20,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from verimcp import audit_resource, idempotency, jsonrpc, telemetry
+from verimcp import audit_resource, idempotency, jsonrpc, stateless, telemetry
 from verimcp import receipts as receipts_module
 from verimcp.audit import AuditStore
 from verimcp.gates.base import RequestGate
 from verimcp.gates.sampling_rate_limit import SamplingRateLimitGate
 from verimcp.gates.tool_call_policy import ToolCallPolicyGate
+from verimcp.gates.tool_visibility import ToolVisibility
 from verimcp.http_backend import HttpBackend
 from verimcp.verifiers import base as verifier_base
 from verimcp.verifiers import registry
@@ -91,6 +92,7 @@ class Proxy:
         backend_url: str | None = None,
         backend_headers: dict[str, str] | None = None,
         receipts_in_reply: bool = False,
+        role: str | None = None,
     ):
         self.backend_cmd = backend_cmd
         # Opt-in via --receipts: append each check's receipt to the tool
@@ -153,6 +155,14 @@ class Proxy:
         if policy_config is not None:
             self._policy_gate = ToolCallPolicyGate.from_yaml(policy_config)
             self._gates.append(self._policy_gate)
+        # Opt-in via --role: which tools this caller may even see (see
+        # gates/tool_visibility.py). None means every tool is listed, same
+        # as today.
+        self._visibility: ToolVisibility | None = None
+        if role is not None:
+            if policy_config is None:
+                raise ValueError("--role needs --policy-config (the file that defines the roles)")
+            self._visibility = ToolVisibility.from_yaml(policy_config, role)
         self._approval_timeout = approval_timeout
         # Whether the Host declared the elicitation capability during
         # initialize -- learned by sniffing that message as it passes
@@ -166,6 +176,10 @@ class Proxy:
         # Host's replies to devmcp's roots/list flow through).
         self._pending_elicitations: dict[str, asyncio.Future] = {}
         self._next_elicitation_id = itertools.count(1)
+        # Stateless-era approvals (spec 2026-07-28) keep nothing here: the
+        # Host carries a signed requestState back on its retry, and this
+        # only holds the key that signs it. See stateless.py.
+        self._approval_state = stateless.ApprovalState()
         # Approval handling runs as a background task (see _handle_approval)
         # so the single _forward_host_to_backend read loop stays free to
         # read the elicitation reply that task is waiting on -- the same
@@ -330,14 +344,43 @@ class Proxy:
                 span = telemetry.start_span(message["method"], target, message["id"])
                 self._active_spans[message["id"]] = (span, time.monotonic())
 
+            if message.get("method") == "tools/call" and "id" in message and self._visibility is not None:
+                name = message.get("params", {}).get("name", "")
+                if not self._visibility.allows(name):
+                    # Called without ever having been listed. Answered here
+                    # with the spec's own unknown-tool error rather than a
+                    # "denied", which would confirm the tool exists. Not a
+                    # perfect disguise: a backend may word its real
+                    # unknown-tool error differently (devmcp does).
+                    self._record_audit(
+                        message,
+                        outcome="denied",
+                        gate={"action": "hidden", "reason": f"tool is not visible to role {self._visibility.role!r}"},
+                    )
+                    jsonrpc.write_message_sync({
+                        "jsonrpc": message.get("jsonrpc", "2.0"),
+                        "id": message["id"],
+                        "error": {"code": -32602, "message": f"Unknown tool: {name}"},
+                    })
+                    continue
+
             if message.get("method") == "tools/call" and "id" in message and self._policy_gate is not None:
                 name = message.get("params", {}).get("name", "")
                 arguments = message.get("params", {}).get("arguments")
                 if self._policy_gate.action_for(name, arguments) == "require_approval":
-                    task = asyncio.create_task(self._handle_approval(message, backend))
-                    self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
-                    continue
+                    if stateless.is_modern(message):
+                        # No handshake to have learned from and no request
+                        # of our own to send: answer from this request alone,
+                        # or fall through to be forwarded once approved.
+                        reply = self._approve_statelessly(message)
+                        if reply is not None:
+                            jsonrpc.write_message_sync(reply)
+                            continue
+                    else:
+                        task = asyncio.create_task(self._handle_approval(message, backend))
+                        self._background_tasks.add(task)
+                        task.add_done_callback(self._background_tasks.discard)
+                        continue
 
             if message.get("method") is not None and "id" in message:
                 denial = self._check_gates(message)
@@ -445,11 +488,20 @@ class Proxy:
                 message = self._inject_audit_resources(message)
 
             if "method" not in message and message.get("id") in self._pending_tools_list:
-                # Observed, not modified -- same technique _extract_root uses
-                # on roots/list replies: watch the response as it passes
-                # through unchanged, don't intercept it.
                 self._pending_tools_list.discard(message["id"])
-                for tool in message.get("result", {}).get("tools", []):
+                result = message.get("result", {})
+                if self._visibility is not None and "tools" in result:
+                    # The one place a backend's reply is cut down rather than
+                    # checked: tools this role may not use are dropped before
+                    # the Host -- and so the model -- ever sees them.
+                    result["tools"] = self._visibility.filter(result["tools"])
+                    if "cacheScope" in result:
+                        # 2026-07-28: this list is now specific to one
+                        # caller, so no shared intermediary may cache it.
+                        result["cacheScope"] = "private"
+                # Schemas are observed, not modified -- same technique
+                # _extract_root uses on roots/list replies.
+                for tool in result.get("tools", []):
                     output_schema = tool.get("outputSchema")
                     if output_schema is not None:
                         self._tool_output_schemas[tool["name"]] = output_schema
@@ -640,6 +692,75 @@ class Proxy:
                 jsonrpc.write_message_sync(
                     {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
                 )
+
+    def _approve_statelessly(self, request: dict) -> dict | None:
+        """require_approval for a stateless-era (2026-07-28) tools/call.
+        Returns the reply to send the Host instead of forwarding, or None
+        once the call is approved and should go on to the backend.
+
+        Same fail-closed rule as _handle_approval, but decided from this one
+        request: its own declared capabilities, and on a retry its own
+        inputResponses + requestState. Known gap: a backend that itself
+        answers input_required uses the same single requestState field, and
+        the two are not composed yet -- the Host's next retry would carry the
+        backend's state, not ours, and be asked for approval again."""
+        params = request.get("params", {})
+        tool_name = params.get("name", "")
+        arguments = params.get("arguments")
+
+        if "elicitation" not in stateless.client_capabilities(request):
+            self._record_audit(
+                request,
+                outcome="denied",
+                gate={"action": "require_approval", "reason": "Host does not support elicitation"},
+                approval={"status": "unsupported"},
+            )
+            return RequestGate._deny(
+                request, f"tool {tool_name!r} requires approval, but the Host does not support elicitation"
+            )
+
+        answer = (params.get("inputResponses") or {}).get(stateless.APPROVAL_KEY)
+        if answer is None or not self._approval_state.verify(params.get("requestState"), tool_name, arguments):
+            # First attempt, or a retry whose state we never issued for this
+            # exact call (forged, expired, or lifted from another call): ask.
+            # This request ends here; the Host's retry is a new one.
+            self._record_audit(
+                request,
+                outcome="approval_requested",
+                gate={"action": "require_approval", "reason": "awaiting approval from Host"},
+                approval={"status": "requested"},
+            )
+            return {
+                "jsonrpc": request.get("jsonrpc", "2.0"),
+                "id": request["id"],
+                "result": {
+                    "resultType": "input_required",
+                    "inputRequests": {stateless.APPROVAL_KEY: stateless.approval_request(tool_name)},
+                    "requestState": self._approval_state.issue(tool_name, arguments),
+                },
+            }
+
+        action = answer.get("action") if isinstance(answer, dict) else None
+        if action != "accept":
+            self._record_audit(
+                request,
+                outcome="denied",
+                gate={"action": "require_approval", "reason": f"approval was {action or 'not granted'}"},
+                approval={"status": action or "not_granted"},
+            )
+            return RequestGate._deny(request, f"approval for tool {tool_name!r} was {action or 'not granted'}")
+
+        # Approved. The answer and the state were addressed to verimcp, so
+        # the backend gets the call as the Host first wrote it.
+        params.pop("requestState", None)
+        params["inputResponses"].pop(stateless.APPROVAL_KEY)
+        if not params["inputResponses"]:
+            del params["inputResponses"]
+        self._pending_approval_meta[request["id"]] = {
+            "gate": {"action": "require_approval", "reason": "approved by Host"},
+            "approval": {"status": "accept"},
+        }
+        return None
 
     async def _handle_approval(self, request: dict, backend) -> None:
         """Runs as a background task (see the require_approval dispatch in
