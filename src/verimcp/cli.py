@@ -96,6 +96,14 @@ def main() -> int:
         "require_approval rule.",
     )
     parser.add_argument(
+        "--discover-timeout",
+        type=float,
+        default=10.0,
+        help="When a stateless (2026-07-28) Host connects, seconds to wait for the backend to "
+        "answer server/discover before treating it as a legacy server and bridging it "
+        "(default: 10). Raise it for a backend that is slow to start, e.g. a first npx run.",
+    )
+    parser.add_argument(
         "--audit-log",
         default=None,
         help="Path to a JSONL file recording every tools/call and resources/read this proxy "
@@ -214,6 +222,7 @@ def main() -> int:
             backend_headers=backend_headers,
             receipts_in_reply=args.receipts,
             role=args.role,
+            discover_timeout=args.discover_timeout,
         )
     except PolicyFileError as e:
         # Refuse to start rather than run with a policy that may be empty.

@@ -20,7 +20,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
-from verimcp import audit_resource, idempotency, jsonrpc, stateless, telemetry
+from verimcp import (
+    audit_resource,
+    era_bridge,
+    idempotency,
+    jsonrpc,
+    stateless,
+    telemetry,
+)
 from verimcp import receipts as receipts_module
 from verimcp.audit import AuditStore
 from verimcp.gates.base import RequestGate
@@ -93,6 +100,7 @@ class Proxy:
         backend_headers: dict[str, str] | None = None,
         receipts_in_reply: bool = False,
         role: str | None = None,
+        discover_timeout: float = 10.0,
     ):
         self.backend_cmd = backend_cmd
         # Opt-in via --receipts: append each check's receipt to the tool
@@ -180,6 +188,15 @@ class Proxy:
         # Host carries a signed requestState back on its retry, and this
         # only holds the key that signs it. See stateless.py.
         self._approval_state = stateless.ApprovalState()
+        # A stateless Host in front of a legacy backend (era_bridge.py). None
+        # for an HTTP backend: http_backend.py runs its own session handshake.
+        self._bridge = era_bridge.Bridge(timeout=discover_timeout) if backend_url is None else None
+        # Whether the Host opened with initialize: a legacy conversation,
+        # which nothing stateless below ever touches.
+        self._host_is_legacy = False
+        # ids of modern requests still waiting for their reply -- every result
+        # sent back for one carries resultType (see _to_host).
+        self._modern_ids: set = set()
         # Approval handling runs as a background task (see _handle_approval)
         # so the single _forward_host_to_backend read loop stays free to
         # read the elicitation reply that task is waiting on -- the same
@@ -281,11 +298,41 @@ class Proxy:
                 return
 
             if message.get("method") == "initialize":
+                self._host_is_legacy = True
                 capabilities = message.get("params", {}).get("capabilities", {})
                 self._host_supports_elicitation = "elicitation" in capabilities
                 self._host_supports_roots = "roots" in capabilities
                 if self._audit is not None and "id" in message:
                     self._pending_initialize.add(message["id"])
+
+            if (
+                not self._host_is_legacy
+                and "method" in message
+                and "id" in message
+                and stateless.is_modern(message)
+            ):
+                if era_bridge.requested_version(message) not in era_bridge.MODERN_VERSIONS:
+                    # verimcp is itself a 2026-07-28 server: a version it
+                    # doesn't implement is refused the way the spec says.
+                    self._to_host(era_bridge.unsupported_version_error(message))
+                    continue
+                self._modern_ids.add(message["id"])
+                if self._bridge is not None:
+                    try:
+                        await self._bridge.ensure_ready(backend)
+                    except RuntimeError as e:
+                        self._to_host({"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32603, "message": f"[verimcp] {e}"}})
+                        continue
+                    if self._bridge.bridging and message["method"] == "server/discover":
+                        # A legacy backend has no server/discover; answer
+                        # for it from its own initialize reply.
+                        extra = {"resources": {}} if self._audit is not None else None
+                        self._to_host({
+                            "jsonrpc": "2.0",
+                            "id": message["id"],
+                            "result": era_bridge.discover_result(self._bridge.init_result, extra),
+                        })
+                        continue
 
             if message.get("method") == "resources/list" and "id" in message and self._audit is not None:
                 self._pending_resource_list.add(message["id"])
@@ -306,7 +353,7 @@ class Proxy:
                 # Ours -- handled locally, never forwarded to the backend and
                 # never tracked in self._pending, same as the synchronous
                 # gate-denial branch below.
-                jsonrpc.write_message_sync(self._handle_audit_resource_request(message))
+                self._to_host(self._handle_audit_resource_request(message))
                 continue
 
             if _is_elicitation_id(message.get("id")) and ("result" in message or "error" in message):
@@ -357,7 +404,7 @@ class Proxy:
                         outcome="denied",
                         gate={"action": "hidden", "reason": f"tool is not visible to role {self._visibility.role!r}"},
                     )
-                    jsonrpc.write_message_sync({
+                    self._to_host({
                         "jsonrpc": message.get("jsonrpc", "2.0"),
                         "id": message["id"],
                         "error": {"code": -32602, "message": f"Unknown tool: {name}"},
@@ -374,7 +421,7 @@ class Proxy:
                         # or fall through to be forwarded once approved.
                         reply = self._approve_statelessly(message)
                         if reply is not None:
-                            jsonrpc.write_message_sync(reply)
+                            self._to_host(reply)
                             continue
                     else:
                         task = asyncio.create_task(self._handle_approval(message, backend))
@@ -391,7 +438,7 @@ class Proxy:
                             outcome="denied",
                             gate={"action": "deny", "reason": denial["error"]["message"]},
                         )
-                    jsonrpc.write_message_sync(denial)
+                    self._to_host(denial)
                     continue
 
             if self._idempotency is not None and message.get("method") == "tools/call" and "id" in message:
@@ -417,7 +464,7 @@ class Proxy:
                             "reason": "identical tool call already verified this session",
                         },
                     )
-                    jsonrpc.write_message_sync(replayed)
+                    self._to_host(replayed)
                     continue
 
             if message.get("method") in ("tools/call", "resources/read") and "id" in message:
@@ -434,6 +481,16 @@ class Proxy:
             if message.get("method") in ("notifications/initialized", "notifications/roots/list_changed"):
                 self._request_roots_from_host()
 
+    def _to_host(self, message: dict) -> None:
+        """Every message verimcp sends the Host goes through here, so a
+        reply to a modern request always carries the resultType 2026-07-28
+        requires -- whether it came from the backend, a verifier, or verimcp
+        itself (an audit read, an idempotent replay)."""
+        if "method" not in message and message.get("id") in self._modern_ids:
+            self._modern_ids.discard(message["id"])
+            era_bridge.stamp_result_type(message)
+        jsonrpc.write_message_sync(message)
+
     def _request_roots_from_host(self) -> None:
         """Ask the Host for its roots directly, instead of only overhearing a
         backend that asks. Many real servers never send roots/list at all --
@@ -446,13 +503,26 @@ class Proxy:
         if not self._host_supports_roots or self._root_override is not None:
             return
         request_id = f"{_ROOTS_ID_PREFIX}{next(self._next_roots_id)}"
-        jsonrpc.write_message_sync({"jsonrpc": "2.0", "id": request_id, "method": "roots/list"})
+        self._to_host({"jsonrpc": "2.0", "id": request_id, "method": "roots/list"})
 
     async def _forward_backend_to_host(self, backend) -> None:
         while True:
             message = await jsonrpc.read_message(backend.stdout)
             if message is None:
                 return
+
+            if self._bridge is not None:
+                if self._bridge.take_reply(message):
+                    continue  # the backend answering the bridge's own handshake
+                if self._bridge.bridging and not self._host_is_legacy:
+                    if "method" in message and "id" in message:
+                        # A stateless Host cannot be sent a request; verimcp
+                        # answers the legacy backend itself.
+                        jsonrpc.write_message(backend.stdin, era_bridge.answer_backend_request(message, self._root))
+                        await backend.stdin.drain()
+                        continue
+                    if era_bridge.is_unsolicited_notification(message):
+                        continue  # list_changed etc. only exist inside subscriptions/listen now
 
             if message.get("method") == "roots/list" and "id" in message:
                 self._pending_roots.add(message["id"])
@@ -545,7 +615,7 @@ class Proxy:
                 if self._receipts_in_reply and request.get("method") == "tools/call":
                     message = receipts_module.attach_to_reply(message, receipts)
 
-            jsonrpc.write_message_sync(message)
+            self._to_host(message)
 
     def _check_gates(self, request: dict) -> dict | None:
         for gate in self._gates:
@@ -689,7 +759,7 @@ class Proxy:
     def _notify_audit_subscribers(self) -> None:
         for uri in (audit_resource.AUDIT_URI, audit_resource.CURRENT_SESSION_URI):
             if uri in self._audit_subscribers:
-                jsonrpc.write_message_sync(
+                self._to_host(
                     {"jsonrpc": "2.0", "method": "notifications/resources/updated", "params": {"uri": uri}}
                 )
 
@@ -779,7 +849,7 @@ class Proxy:
                 gate={"action": "require_approval", "reason": "Host does not support elicitation"},
                 approval={"status": "unsupported"},
             )
-            jsonrpc.write_message_sync(
+            self._to_host(
                 RequestGate._deny(request, f"tool {tool_name!r} requires approval, but the Host does not support elicitation")
             )
             return
@@ -787,7 +857,7 @@ class Proxy:
         elicit_id = f"{_ELICITATION_ID_PREFIX}{next(self._next_elicitation_id)}"
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending_elicitations[elicit_id] = future
-        jsonrpc.write_message_sync({
+        self._to_host({
             "jsonrpc": "2.0",
             "id": elicit_id,
             "method": "elicitation/create",
@@ -810,7 +880,7 @@ class Proxy:
                 gate={"action": "require_approval", "reason": "approval timed out"},
                 approval={"status": "timeout"},
             )
-            jsonrpc.write_message_sync(RequestGate._deny(request, f"approval request for tool {tool_name!r} timed out"))
+            self._to_host(RequestGate._deny(request, f"approval request for tool {tool_name!r} timed out"))
             return
 
         action = reply.get("result", {}).get("action")
@@ -837,6 +907,6 @@ class Proxy:
                 gate={"action": "require_approval", "reason": f"approval was {action or 'not granted'}"},
                 approval={"status": action or "not_granted"},
             )
-            jsonrpc.write_message_sync(
+            self._to_host(
                 RequestGate._deny(request, f"approval for tool {tool_name!r} was {action or 'not granted'}")
             )

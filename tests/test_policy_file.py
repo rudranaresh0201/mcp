@@ -56,7 +56,7 @@ def test_verimcp_refuses_to_start_with_a_readable_error(tmp_path):
     path = write(tmp_path, b"rule:\n  - tool: write_file\n    action: deny\n")
     result = subprocess.run(
         [sys.executable, "-m", "verimcp.cli", "--policy-config", str(path), "--", sys.executable, "-c", "pass"],
-        capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL, check=False,
     )
     assert result.returncode == 2
     assert "error:" in result.stderr and "unknown top-level key" in result.stderr

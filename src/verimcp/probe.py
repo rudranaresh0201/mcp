@@ -31,13 +31,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from verimcp import stateless
+from verimcp.era_bridge import (
+    CLIENT_INFO_KEY,
+    LEGACY_VERSION,
+    MODERN_VERSIONS,
+    SERVER_INFO_KEY,
+    era_of_discover_reply,
+)
 
-MODERN_VERSION = "2026-07-28"
-LEGACY_VERSION = "2025-11-25"
-UNSUPPORTED_VERSION = -32022
+MODERN_VERSION = MODERN_VERSIONS[0]
 CLIENT_INFO = {"name": "verimcp-probe", "version": "0.1.0"}
-CLIENT_INFO_KEY = "io.modelcontextprotocol/clientInfo"
-SERVER_INFO_KEY = "io.modelcontextprotocol/serverInfo"
 
 
 class ServerExited(Exception):
@@ -147,8 +150,9 @@ def probe(command: list[str], timeout: float = 5.0, trace=lambda direction, mess
 def _probe(server: _Server, timeout: float) -> ProbeResult:
     reply = server.request("probe-discover", "server/discover", modern_meta(), timeout)
     discover = _describe(reply)
+    modern = era_of_discover_reply(reply) == "modern"  # the same rule verimcp's bridge uses
 
-    if reply is not None and "result" in reply:
+    if modern and "result" in reply:
         result = reply["result"]
         listed = server.request("probe-tools", "tools/list", modern_meta(), timeout)
         tools_result = (listed or {}).get("result", {})
@@ -163,7 +167,7 @@ def _probe(server: _Server, timeout: float) -> ProbeResult:
             result_type_on_tools_list=tools_result.get("resultType"),
         )
 
-    if reply is not None and reply.get("error", {}).get("code") == UNSUPPORTED_VERSION:
+    if modern:  # UnsupportedProtocolVersionError
         # Modern, just not our version: the spec forbids falling back to
         # initialize here.
         return ProbeResult(
@@ -214,6 +218,8 @@ def render(result: ProbeResult, command: list[str]) -> str:
         f"capabilities:   {', '.join(sorted(result.capabilities)) or '(none)'}",
         f"tools ({len(result.tools)}):      {', '.join(result.tools) or '(none)'}",
     ]
+    if result.era == "modern" and result.protocol_version:
+        lines.append(f"resultType:     {result.result_type_on_tools_list or 'MISSING (required by 2026-07-28)'} on tools/list")
     if result.era == "legacy":
         lines.append(
             f"verdict:        a {MODERN_VERSION} stateless Host cannot use this server directly "
