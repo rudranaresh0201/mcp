@@ -899,8 +899,10 @@ async def test_docker_tools_verified_over_real_pipe(tmp_path: Path):
         # independently confirmed real is DockerVerifier still being listed
         # with no [verimcp] override text -- if it had caught a lie, the
         # content text below would say so.
+        # Since the backend itself admitted failure, the audit outcome is
+        # backend_error (not verified_failed, which means "caught a lie").
         run_entry = by_target["docker_run_container"]
-        assert run_entry["outcome"] == "verified_failed"
+        assert run_entry["outcome"] == "backend_error"
         assert "DockerVerifier" in run_entry["verification"]["verifiers"]
     finally:
         proc.terminate()
