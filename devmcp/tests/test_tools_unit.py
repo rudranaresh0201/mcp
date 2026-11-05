@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 import sqlite3
 import subprocess
 
@@ -14,7 +15,7 @@ from devmcp.tools.sqlite_insert_row import SqliteInsertRowTool
 from devmcp.tools.write_file import WriteFileTool
 
 pytestmark_docker = pytest.mark.skipif(
-    subprocess.run(["docker", "info"], capture_output=True, check=False).returncode != 0,
+    (shutil.which("docker") is None or subprocess.run(["docker", "info"], capture_output=True, check=False).returncode != 0),
     reason="docker daemon not available",
 )
 

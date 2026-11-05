@@ -33,6 +33,21 @@ two (like 0.2.2 below), in which case only that package's version moves.
 
 ### Fixed
 
+- `--idempotent-replay` could answer a deliberate repeat from cache: after
+  `write(a, v1)`, `write(a, v2)`, a later `write(a, v1)` was replied to
+  "wrote v1" while `v2` stayed on disk. Only an immediate repeat now counts
+  as a retry -- any call that reaches the backend clears the cache, and a
+  reply that arrives after a newer call was sent is never cached.
+- Only calls with a real `verified` receipt are cached for replay.
+- A verifier that recorded no evidence was labelled VERIFIED -- the same
+  label a check that actually ran gets. It is now `unconfirmed`, since
+  skipping (no root, unfamiliar reply shape) looks identical from outside.
+- `CIRunVerifier` now records a receipt saying how many steps it re-ran.
+- A verifier that raised an exception killed the reply loop and left the
+  Host waiting forever (e.g. `DockerVerifier` with docker not installed).
+  The claim now passes through with an `unconfirmed` receipt instead.
+- Docker tests skip when docker is not installed instead of erroring, and
+  `benchmark_claim_acceptance.py` skips docker scenarios in that case.
 - The `dashboard` extra now installs `websockets`; a clean
   `pip install verimcp[dashboard]` previously served the console page but
   refused every live connection. Found by installing the built wheel into

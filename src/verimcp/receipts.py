@@ -27,10 +27,13 @@ def fallback(verifier_names: list[str], passed: bool | None, detail: str | None)
     checked_at = datetime.now(UTC).isoformat(timespec="seconds")
     names = ", ".join(verifier_names)
     if passed:
-        summary = f"passed {names}'s check (this verifier doesn't record receipt details yet)"
+        # The verifier returned the reply untouched and recorded no evidence.
+        # That is also what every verifier does when it *skips* (no root,
+        # unfamiliar reply shape), so it must not read as "verified".
+        summary = f"not flagged by {names}, but no evidence was recorded, so this claim is unconfirmed"
     else:
         summary = detail or f"contradicted by {names}"
-    return [{"verifier": names, "verdict": "verified" if passed else "contradicted", "summary": summary,
+    return [{"verifier": names, "verdict": "unconfirmed" if passed else "contradicted", "summary": summary,
              "source": "verimcp verifier", "checked_at": checked_at, "evidence": {}}]
 
 

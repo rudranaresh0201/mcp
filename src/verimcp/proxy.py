@@ -239,6 +239,8 @@ class Proxy:
         # retry is forwarded and re-executed by the backend, unchanged existing
         # behavior. See idempotency.py's module docstring for the adaptation.
         self._idempotency = idempotency.IdempotencyCache() if idempotent_replay else None
+        # Generation each forwarded tools/call was sent under (see IdempotencyCache).
+        self._idempotency_generation: dict = {}
 
     async def run(self) -> None:
         if self.backend_url is not None:
@@ -469,6 +471,8 @@ class Proxy:
 
             if message.get("method") in ("tools/call", "resources/read") and "id" in message:
                 self._pending[message["id"]] = message
+                if self._idempotency is not None and message["method"] == "tools/call":
+                    self._idempotency_generation[message["id"]] = self._idempotency.note_forwarded()
 
             if message.get("id") in self._pending_roots and ("result" in message or "error" in message):
                 self._pending_roots.discard(message["id"])
@@ -585,11 +589,19 @@ class Proxy:
 
             request = self._pending.pop(message.get("id"), None)
             if request is not None:
+                generation = self._idempotency_generation.pop(message.get("id"), None)
                 params = request.get("params", {})
                 identifier = params.get("uri", "") if request.get("method") == "resources/read" else params.get("name", "")
                 verifiers_run = registry.verifiers_for(identifier, self._verifiers)
                 for verifier in verifiers_run:
-                    message = verifier.verify(request, message, root=self._root)
+                    try:
+                        message = verifier.verify(request, message, root=self._root)
+                    except Exception as e:  # noqa: BLE001 -- any verifier bug, by design
+                        # A crashing verifier must not take the proxy down with
+                        # it: an exception here used to kill this loop, leaving
+                        # the Host waiting forever for a reply. The claim goes
+                        # through unchanged but is labelled unconfirmed.
+                        verifier_base.record_verifier_crash(message, verifier, e)
                 # Popped before anything else touches the message, so the
                 # private key can never reach the Host or the retry cache.
                 receipts = verifier_base.pop_receipts(message)
@@ -599,6 +611,7 @@ class Proxy:
                     self._idempotency is not None
                     and request.get("method") == "tools/call"
                     and verifiers_run
+                    and any(r.get("verdict") == "verified" for r in receipts)
                     and "error" not in message
                     and not message.get("result", {}).get("isError")
                 ):
@@ -610,7 +623,7 @@ class Proxy:
                     # own caveat: postconditions encode domain knowledge that
                     # can't be inferred from an API call alone.
                     key = idempotency.compute_key(params.get("name", ""), params.get("arguments"))
-                    self._idempotency.record_verified_ok(key, message)
+                    self._idempotency.record_verified_ok(key, message, generation)
 
                 if self._receipts_in_reply and request.get("method") == "tools/call":
                     message = receipts_module.attach_to_reply(message, receipts)
@@ -898,6 +911,8 @@ class Proxy:
                 "approval": {"status": "accept"},
             }
             self._pending[request["id"]] = request
+            if self._idempotency is not None:
+                self._idempotency_generation[request["id"]] = self._idempotency.note_forwarded()
             jsonrpc.write_message(backend.stdin, request)
             await backend.stdin.drain()
         else:

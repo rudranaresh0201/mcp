@@ -41,13 +41,33 @@ class IdempotencyCache:
     same lifetime as self._pending. A retry from a brand-new session has no
     entry to find, by design: verify-before-retry only ever helps *within*
     a session that's actively retrying, it isn't a durable cross-session
-    dedupe store."""
+    dedupe store.
+
+    Only an *immediate* repeat counts as a retry. A key built from (tool,
+    arguments) alone cannot tell a resend from a deliberate repeat, so any
+    call that actually reaches the backend clears the cache: after
+    write(a, v1), write(a, v2), a later write(a, v1) is real work and must
+    run, not be answered "wrote v1" from a cache while v2 sits on disk.
+    The generation counter covers replies that arrive out of order: a
+    reply to a call sent before the most recent forwarded call is stale
+    and is never cached.
+    """
 
     def __init__(self) -> None:
         self._verified_ok: dict[str, dict[str, Any]] = {}
+        self._generation = 0
 
     def lookup(self, key: str) -> dict[str, Any] | None:
         return self._verified_ok.get(key)
 
-    def record_verified_ok(self, key: str, response: dict[str, Any]) -> None:
+    def note_forwarded(self) -> int:
+        """Call for every tools/call that is sent to the backend. Returns the
+        generation to pass back to record_verified_ok with its reply."""
+        self._verified_ok.clear()
+        self._generation += 1
+        return self._generation
+
+    def record_verified_ok(self, key: str, response: dict[str, Any], generation: int | None = None) -> None:
+        if generation is not None and generation != self._generation:
+            return  # another call reached the backend since this one was sent
         self._verified_ok[key] = response
