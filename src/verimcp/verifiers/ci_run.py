@@ -66,6 +66,7 @@ class CIRunVerifier(Verifier):
         if root is None:
             return response  # can't re-run steps without knowing the repo -- don't guess, don't block
 
+        rerun = []
         for step in steps:
             if not step.get("idempotent"):
                 continue  # not safe to re-run -- unmarked steps are trusted on self-consistency only
@@ -76,5 +77,13 @@ class CIRunVerifier(Verifier):
                     f"step {step.get('name')!r} claimed exit_code={step.get('exit_code')!r}, "
                     f"but re-running it produced exit_code={actual_exit_code!r}",
                 )
+            rerun.append(step.get("name"))
 
-        return response  # verified: claims are self-consistent and idempotent steps re-confirmed
+        # The summary says exactly how far the check went: re-running a step is
+        # strong evidence, per-step self-consistency alone is weaker.
+        return self._receipt(
+            response, verdict="verified",
+            summary=f"{len(steps)} step(s) self-consistent; {len(rerun)} re-run and re-confirmed",
+            source=f"re-ran steps marked idempotent under {root}",
+            evidence={"steps": len(steps), "rerun": rerun, "passed": overall_passed},
+        )

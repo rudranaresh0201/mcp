@@ -11,6 +11,8 @@ Listed on the [official MCP Registry](https://registry.modelcontextprotocol.io/?
 
 **[Watch the console →](https://verimcp-console.onrender.com)** — a recorded session replaying in the browser: three verified calls, five caught lies, one honest backend error.
 
+**Status:** stable, maintained at a low pace. Bug reports and new verifiers welcome.
+
 ## Problem
 
 MCP tool calls are trusted by default, in two different ways that both bite in production agent workflows:
@@ -75,6 +77,19 @@ verimcp duplicate-action rate:  0/5  (0%)
 - **Proven against real clients, not just our own tests** — the official MCP Inspector and VS Code's native MCP support (Copilot Chat) each caught a real bug our own test suite never triggered, now fixed with regression tests.
 
 Deeper design reasoning (why prompts/roots get no verifier on principle, why policy is a separate concept from verification, etc.) lives in [`docs/adr/`](docs/adr/) for anyone who wants to go that deep — the summary above is everything needed to use or evaluate the project.
+
+## Known limitations
+
+- **Verifiers are per tool.** A tool with no verifier passes through unchecked
+  (only the schema-conformance baseline applies). Coverage today: filesystem,
+  git, CI, SQLite, Docker, GitHub, and `mcp-server-git`.
+- **Checks run after the call.** A verifier confirms the claimed state exists
+  now; it cannot always prove *this* call produced it (e.g. a commit hash
+  that already existed before the call).
+- **Unchecked is labelled, not hidden.** A verifier that skips or records no
+  evidence yields an `unconfirmed` receipt, never `verified`.
+- **Checks are synchronous.** A slow verifier (a GitHub API call, a CI
+  re-run) delays the proxy's other traffic while it runs.
 
 ## Getting started
 

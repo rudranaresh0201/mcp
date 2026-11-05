@@ -24,6 +24,7 @@ Usage: python scripts/benchmark_claim_acceptance.py
 """
 import asyncio
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -234,19 +235,26 @@ async def main() -> None:
     print(f"{'Scenario':<38} {'RAW accepted':<14} {'verimcp caught':<15}")
     print("-" * 67)
 
+    # DockerVerifier checks claims by asking the real docker daemon; with no
+    # docker installed there is nothing to check against, so those scenarios
+    # are skipped rather than reported as misses.
+    corpus = CORPUS if shutil.which("docker") else [s for s in CORPUS if not s.lie.startswith("docker_")]
+    if len(corpus) < len(CORPUS):
+        print(f"(docker not installed: skipping {len(CORPUS) - len(corpus)} docker scenario(s))\n")
+
     raw_accepted = 0
     verimcp_caught = 0
     with tempfile.TemporaryDirectory() as tmp:
         repo_path = Path(tmp)
         _init_repo(repo_path)
-        for scenario in CORPUS:
+        for scenario in corpus:
             accepted = await _run_raw(repo_path, scenario)
             caught = await _run_verimcp(repo_path, scenario)
             raw_accepted += accepted
             verimcp_caught += caught
             print(f"{scenario.id:<38} {accepted!s:<14} {caught!s:<15}")
 
-    n = len(CORPUS)
+    n = len(corpus)
     print("-" * 67)
     print(f"RAW claim-acceptance rate:     {raw_accepted}/{n}  ({100 * raw_accepted / n:.0f}%)")
     print(f"verimcp claim-catch rate:      {verimcp_caught}/{n}  ({100 * verimcp_caught / n:.0f}%)")

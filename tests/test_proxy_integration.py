@@ -3,6 +3,7 @@ driven over real stdio -- the same shape devmcp/tests/test_server_integration.py
 uses, one layer deeper. No mocks anywhere in this chain."""
 import asyncio
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -850,7 +851,7 @@ async def test_docker_tools_verified_over_real_pipe(tmp_path: Path):
     tests: real subprocess pair, a real image built and a real container
     run through it, DockerVerifier independently re-inspecting both via
     `docker inspect` rather than trusting devmcp's own report."""
-    if subprocess.run(["docker", "info"], capture_output=True, check=False).returncode != 0:
+    if (shutil.which("docker") is None or subprocess.run(["docker", "info"], capture_output=True, check=False).returncode != 0):
         pytest.skip("docker daemon not available")
 
     (tmp_path / "Dockerfile").write_text('FROM busybox\nCMD ["sh", "-c", "exit 5"]\n')
@@ -954,6 +955,29 @@ async def test_sqlite_tools_verified_over_real_pipe(tmp_path: Path):
         assert by_target["sqlite_create_table"]["verification"]["verifiers"] == ["SQLiteVerifier"]
         assert by_target["sqlite_insert_row"]["outcome"] == "verified_ok"
         assert by_target["sqlite_insert_row"]["verification"]["verifiers"] == ["SQLiteVerifier"]
+    finally:
+        proc.terminate()
+        await proc.wait()
+
+
+async def test_idempotent_replay_does_not_swallow_a_deliberate_repeat(tmp_path: Path):
+    """Regression: write(a, v1), write(a, v2), write(a, v1). The third call is
+    new work, not a retry -- it must reach the backend. Before the fix it was
+    answered "wrote v1" from cache while v2 stayed on disk."""
+    proc = await _spawn_verimcp(tmp_path, ["--idempotent-replay"])
+    try:
+        await _initialize(proc)
+        roots_request = await _recv(proc)
+        await _send(proc, {
+            "jsonrpc": "2.0", "id": roots_request["id"],
+            "result": {"roots": [{"uri": tmp_path.as_uri(), "name": "repo"}]},
+        })
+        for i, content in enumerate(["v1", "v2", "v1"], start=2):
+            await _send(proc, {"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                               "params": {"name": "write_file", "arguments": {"path": "a.txt", "content": content}}})
+            reply = await _recv(proc)
+            assert reply["result"]["isError"] is False
+        assert (tmp_path / "a.txt").read_text() == "v1"
     finally:
         proc.terminate()
         await proc.wait()

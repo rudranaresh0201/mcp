@@ -22,6 +22,18 @@ RECEIPTS_KEY = "__verimcp_receipts__"
 def pop_receipts(message: dict[str, Any]) -> list[dict[str, Any]]:
     return message.pop(RECEIPTS_KEY, None) or []
 
+def record_verifier_crash(message: dict[str, Any], verifier: Any, error: BaseException) -> None:
+    """Receipt for a verifier that raised instead of returning a verdict."""
+    message.setdefault(RECEIPTS_KEY, []).append({
+        "verifier": type(verifier).__name__,
+        "verdict": "unconfirmed",
+        "summary": f"verifier crashed, so this claim was not checked: {type(error).__name__}: {error}",
+        "source": "verimcp",
+        "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "evidence": {},
+    })
+
+
 # The one place this string is written. Both enforcement shapes below build
 # on it and extract_failure_detail() reads it back off -- keeping producer
 # and parser in one module is deliberate: a parser living in proxy.py would

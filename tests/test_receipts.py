@@ -100,7 +100,7 @@ def test_reply_block_is_appended_to_a_copy_and_keeps_content_0():
 def test_fallback_says_only_what_is_known():
     assert receipts.fallback(["SQLiteVerifier"], None, None) == []
     [ok] = receipts.fallback(["SQLiteVerifier"], True, None)
-    assert ok["verdict"] == "verified" and "doesn't record receipt details yet" in ok["summary"]
+    assert ok["verdict"] == "unconfirmed" and "no evidence was recorded" in ok["summary"]
     [bad] = receipts.fallback(["SQLiteVerifier"], False, "row not found")
     assert bad["verdict"] == "contradicted" and bad["summary"] == "row not found"
 

@@ -1,6 +1,7 @@
 """Unit-level: exercise DockerVerifier directly against real docker state --
 no subprocess-pair needed to prove the ground-truth check itself, same
 approach test_git_commit_verifier.py already uses for `git cat-file`."""
+import shutil
 import subprocess
 
 import pytest
@@ -8,7 +9,7 @@ import pytest
 from verimcp.verifiers.docker import DockerVerifier
 
 pytestmark = pytest.mark.skipif(
-    subprocess.run(["docker", "info"], capture_output=True, check=False).returncode != 0,
+    (shutil.which("docker") is None or subprocess.run(["docker", "info"], capture_output=True, check=False).returncode != 0),
     reason="docker daemon not available",
 )
 
